@@ -17,5 +17,16 @@ class Settings(BaseSettings):
     chesscom_base_url: str = "https://api.chess.com/pub"
     chesscom_user_agent: str = "chess-analyzer-app"
 
+    # Claude writes the coaching prose. It never evaluates positions -- Stockfish is
+    # the source of truth, and the model only explains numbers it is handed.
+    anthropic_api_key: str = ""
+    llm_model: str = "claude-opus-5"
+    # Per-move blurbs run at low effort; the multi-game report overrides to high.
+    llm_effort: str = "low"
+    # Generous on purpose. Thinking tokens are drawn from this same budget, so a
+    # report at high effort can spend most of it reasoning before it starts writing;
+    # too low a ceiling truncates the JSON mid-string and the whole call is wasted.
+    llm_max_tokens: int = 32000
+
 
 settings = Settings()

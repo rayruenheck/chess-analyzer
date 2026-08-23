@@ -60,11 +60,94 @@ CREATE TABLE IF NOT EXISTS game_plies (
     fen_before TEXT NOT NULL,
     fen_after TEXT NOT NULL,
     move_uci TEXT NOT NULL,
+    move_san TEXT,
     mover TEXT NOT NULL,
+    clock_after_seconds REAL,
+    seconds_spent REAL,
     created_at TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (game_id, ply)
 );
+
+CREATE TABLE IF NOT EXISTS games (
+    game_id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    username TEXT NOT NULL,
+    user_color TEXT NOT NULL,
+    opponent TEXT,
+    user_rating INTEGER,
+    opponent_rating INTEGER,
+    result TEXT NOT NULL,
+    user_score REAL,
+    speed TEXT,
+    url TEXT,
+    played_at TEXT,
+    eco TEXT,
+    opening_name TEXT,
+    opening_ply INTEGER,
+    initial_seconds INTEGER,
+    increment_seconds INTEGER,
+    analyzed INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS games_job_idx ON games (job_id);
+
+CREATE TABLE IF NOT EXISTS llm_feedback (
+    cache_key TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    model TEXT NOT NULL,
+    response_json TEXT NOT NULL,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    cache_read_tokens INTEGER,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS llm_feedback_subject_idx ON llm_feedback (kind, subject);
 """
+
+
+# Columns added to tables that predate them. CREATE TABLE IF NOT EXISTS is a no-op
+# on an existing table, so new columns have to be ALTERed in for databases created
+# before they were introduced.
+ADDED_COLUMNS = {
+    "game_plies": {
+        "move_san": "TEXT",
+        "clock_after_seconds": "REAL",
+        "seconds_spent": "REAL",
+    },
+    "games": {
+        "analyzed": "INTEGER NOT NULL DEFAULT 0",
+        "eco": "TEXT",
+        "opening_name": "TEXT",
+        "opening_ply": "INTEGER",
+        "initial_seconds": "INTEGER",
+        "increment_seconds": "INTEGER",
+    },
+}
+
+
+async def _migrate(connection: aiosqlite.Connection) -> None:
+    for table, columns in ADDED_COLUMNS.items():
+        async with connection.execute(f"PRAGMA table_info({table})") as cursor:
+            existing = {row[1] for row in await cursor.fetchall()}
+        for column, column_type in columns.items():
+            if column not in existing:
+                await connection.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {column_type}"
+                )
+
+    # games.analyzed defaults to 0, which would retroactively lock out every game
+    # from a job that finished before the column existed. A job marked done walked
+    # all of its games to completion, so its games are analyzed by definition.
+    # Idempotent, so it is safe to re-run on every startup.
+    await connection.execute(
+        "UPDATE games SET analyzed = 1 "
+        "WHERE analyzed = 0 AND job_id IN (SELECT job_id FROM jobs WHERE status = 'done')"
+    )
+    await connection.commit()
 
 
 async def init_db() -> None:
@@ -73,6 +156,7 @@ async def init_db() -> None:
     _connection = await aiosqlite.connect(settings.db_path)
     await _connection.executescript(SCHEMA)
     await _connection.commit()
+    await _migrate(_connection)
 
 
 async def close_db() -> None:
