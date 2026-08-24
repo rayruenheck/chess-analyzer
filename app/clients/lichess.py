@@ -24,11 +24,23 @@ class LichessClient:
     async def get_user_games(self, username: str, max_games: int = 20) -> list[dict]:
         resp = await self._client.get(
             f"/api/games/user/{username}",
-            params={"max": max_games, "pgnInJson": "true"},
+            params={
+                "max": max_games,
+                "pgnInJson": "true",
+                # Both are opt-in and both are needed downstream: clocks drive the
+                # per-move time analysis, opening gives the ECO code and name.
+                "clocks": "true",
+                "opening": "true",
+            },
             headers={"Accept": "application/x-ndjson"},
         )
         resp.raise_for_status()
-        return [json.loads(line) for line in resp.text.splitlines() if line.strip()]
+        # Decoded explicitly rather than via resp.text. httpx currently infers UTF-8
+        # for this response correctly, but the ndjson content-type carries no charset,
+        # so that is inference rather than a guarantee -- and opening names are full of
+        # accents ("Sämisch") that would corrupt silently if it ever changed.
+        body = resp.content.decode("utf-8")
+        return [json.loads(line) for line in body.splitlines() if line.strip()]
 
     async def get_cloud_eval(self, fen: str, multi_pv: int = 1) -> dict:
         resp = await self._client.get(

@@ -1,0 +1,593 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chess Analyzer</title>
+<style>
+  /* No CDN, no build step, no dependencies -- the board is drawn from the FEN
+     with CSS grid and unicode pieces, so this works with the network down. */
+  :root {
+    --bg: #16161a; --panel: #1e1e24; --line: #2e2e37; --ink: #e8e8ea;
+    --dim: #9a9aa4; --accent: #7aa2f7; --light: #b9a37e; --dark: #6d5540;
+    --blunder: #e05252; --mistake: #e0913f; --inaccuracy: #d8c141; --good: #6cb86c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    padding: 14px 18px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  h1 { font-size: 15px; margin: 0 14px 0 0; font-weight: 600; letter-spacing: .02em; }
+  input, select, button {
+    font: inherit; color: var(--ink); background: #26262e;
+    border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px;
+  }
+  input { width: 150px; }
+  input[type=number] { width: 74px; }
+  button { cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: var(--accent); color: #10131c; border-color: var(--accent); font-weight: 600; }
+  #status { color: var(--dim); margin-left: 4px; }
+
+  main { display: grid; grid-template-columns: 230px minmax(320px, 460px) 1fr; gap: 16px; padding: 16px; align-items: start; }
+  @media (max-width: 1000px) { main { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .panel h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .09em; color: var(--dim);
+    margin: 0; padding: 10px 12px; border-bottom: 1px solid var(--line); font-weight: 600;
+  }
+  .scroll { max-height: 62vh; overflow-y: auto; }
+
+  .game { padding: 9px 12px; border-bottom: 1px solid var(--line); cursor: pointer; font-size: 13px; }
+  .game:hover { background: #26262e; }
+  .game.active { background: #2b3350; }
+  .game.pending { opacity: .5; cursor: default; }
+  .game.pending:hover { background: transparent; }
+  .game .vs { color: var(--dim); font-size: 12px; }
+
+  /* Board */
+  #board { display: grid; grid-template-columns: repeat(8, 1fr); aspect-ratio: 1; width: 100%; }
+  #board div {
+    display: flex; align-items: center; justify-content: center;
+    font-size: clamp(22px, 4.4vw, 40px); line-height: 1; user-select: none;
+  }
+  .sq-l { background: var(--light); } .sq-d { background: var(--dark); }
+  .piece-w { color: #fff; text-shadow: 0 0 2px #000, 0 1px 2px #0008; }
+  .piece-b { color: #1a1a1a; text-shadow: 0 0 2px #fff6; }
+  .hl { box-shadow: inset 0 0 0 3px var(--accent); }
+  .nav { display: flex; gap: 6px; padding: 10px; border-top: 1px solid var(--line); align-items: center; }
+  .nav button { padding: 5px 12px; }
+  #plyLabel { margin-left: auto; color: var(--dim); font-variant-numeric: tabular-nums; font-size: 13px; }
+
+  /* Eval bar */
+  #evalWrap { height: 8px; background: #111; position: relative; }
+  #evalBar { height: 100%; background: #e8e8ea; width: 50%; transition: width .18s; }
+
+  /* Move list */
+  .moves { display: flex; flex-wrap: wrap; gap: 2px; padding: 8px; }
+  .mv {
+    padding: 2px 7px; border-radius: 4px; cursor: pointer; font-size: 13px;
+    font-variant-numeric: tabular-nums; border: 1px solid transparent;
+  }
+  .mv:hover { background: #2c2c36; }
+  .mv.active { background: var(--accent); color: #10131c; font-weight: 600; }
+  .mv.own { font-weight: 500; }
+  .num { color: var(--dim); padding: 2px 2px 2px 8px; font-size: 12px; }
+  .sev-blunder { color: var(--blunder); } .sev-mistake { color: var(--mistake); }
+  .sev-inaccuracy { color: var(--inaccuracy); }
+
+  .tabs { display: flex; border-bottom: 1px solid var(--line); }
+  .tabs button {
+    flex: 1; border: 0; border-radius: 0; background: transparent; color: var(--dim);
+    padding: 9px; font-size: 12px; text-transform: uppercase; letter-spacing: .07em;
+  }
+  .tabs button.active { color: var(--ink); box-shadow: inset 0 -2px 0 var(--accent); }
+  .body { padding: 14px; }
+  .stat { display: inline-block; margin: 0 16px 10px 0; }
+  .stat b { display: block; font-size: 19px; font-variant-numeric: tabular-nums; }
+  .stat span { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+  .card { border: 1px solid var(--line); border-radius: 8px; padding: 11px 13px; margin-bottom: 10px; }
+  .card h4 { margin: 0 0 5px; font-size: 13px; }
+  .card p { margin: 0 0 6px; }
+  .label { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--dim); }
+  .muted { color: var(--dim); }
+  code { background: #26262e; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  ul { margin: 6px 0; padding-left: 20px; }
+  table { width: 100%; border-collapse: collapse; margin: 6px 0 10px; font-size: 13px; }
+  th { text-align: left; font-weight: 500; color: var(--dim); font-size: 11px;
+       text-transform: uppercase; letter-spacing: .06em; padding: 4px 6px; }
+  td { padding: 4px 6px; border-top: 1px solid var(--line); }
+  td:last-child, th:last-child { text-align: right; }
+  .err { color: var(--blunder); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Chess Analyzer</h1>
+  <select id="platform">
+    <option value="chesscom">Chess.com</option>
+    <option value="lichess">Lichess</option>
+  </select>
+  <input id="username" placeholder="username" autocomplete="off">
+  <input id="maxGames" type="number" value="10" min="1" max="100" title="games to analyze">
+  <button class="primary" id="analyze">Analyze</button>
+  <select id="speedFilter" title="limit the report to one time control">
+    <option value="">All time controls</option>
+  </select>
+  <button id="reportBtn" disabled>Coaching report</button>
+  <span id="status"></span>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>Games</h2>
+    <div class="scroll" id="gameList"><div class="body muted">Run an analysis to begin.</div></div>
+  </section>
+
+  <section class="panel">
+    <h2>Board</h2>
+    <div id="evalWrap"><div id="evalBar"></div></div>
+    <div id="board"></div>
+    <div class="nav">
+      <button id="first">&laquo;</button>
+      <button id="prev">&lsaquo;</button>
+      <button id="next">&rsaquo;</button>
+      <button id="last">&raquo;</button>
+      <span id="plyLabel">--</span>
+    </div>
+    <div class="moves scroll" id="moveList"></div>
+  </section>
+
+  <section class="panel">
+    <div class="tabs">
+      <button data-tab="move" class="active">This move</button>
+      <button data-tab="game">Game review</button>
+      <button data-tab="openings">Openings</button>
+      <button data-tab="report">Report</button>
+    </div>
+    <div class="body scroll" id="tabBody"><span class="muted">Pick a game, then step to a move.</span></div>
+  </section>
+</main>
+
+<script>
+const START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -";
+const GLYPHS = { p:"♟", n:"♞", b:"♝", r:"♜", q:"♛", k:"♚" };
+
+const state = { jobId: null, gameId: null, moves: [], ply: 0, tab: "move", cache: {} };
+const $ = id => document.getElementById(id);
+
+async function api(path, options) {
+  const res = await fetch(path, options);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || res.statusText);
+  return data;
+}
+
+/* ---- board ------------------------------------------------------------- */
+function renderBoard(fen, lastMove) {
+  const rows = fen.split(" ")[0].split("/");
+  const board = $("board");
+  board.innerHTML = "";
+  rows.forEach((row, r) => {
+    let file = 0;
+    for (const ch of row) {
+      if (/\d/.test(ch)) {
+        for (let i = 0; i < +ch; i++) drawSquare(board, r, file++, null, lastMove);
+      } else {
+        drawSquare(board, r, file++, ch, lastMove);
+      }
+    }
+  });
+}
+
+function drawSquare(board, rank, file, piece, lastMove) {
+  const cell = document.createElement("div");
+  cell.className = (rank + file) % 2 === 0 ? "sq-l" : "sq-d";
+  const name = "abcdefgh"[file] + (8 - rank);
+  if (lastMove && (lastMove.slice(0, 2) === name || lastMove.slice(2, 4) === name)) {
+    cell.classList.add("hl");
+  }
+  if (piece) {
+    cell.textContent = GLYPHS[piece.toLowerCase()];
+    cell.classList.add(piece === piece.toUpperCase() ? "piece-w" : "piece-b");
+  }
+  board.appendChild(cell);
+}
+
+function setEvalBar(cp, mate) {
+  let pct = 50;
+  if (mate != null) pct = mate > 0 ? 100 : 0;
+  else if (cp != null) pct = 100 / (1 + Math.exp(-cp / 320));
+  $("evalBar").style.width = pct + "%";
+}
+
+/* ---- move list --------------------------------------------------------- */
+function renderMoves() {
+  const list = $("moveList");
+  list.innerHTML = "";
+  state.moves.forEach((m, i) => {
+    if (i % 2 === 0) {
+      const num = document.createElement("span");
+      num.className = "num";
+      num.textContent = m.move_number + ".";
+      list.appendChild(num);
+    }
+    const el = document.createElement("span");
+    el.className = "mv" + (m.is_player_move ? " own" : "") +
+      (i + 1 === state.ply ? " active" : "") +
+      (m.is_player_move && m.severity !== "ok" ? " sev-" + m.severity : "");
+    el.textContent = m.played_san + severityMark(m);
+    el.onclick = () => goTo(i + 1);
+    list.appendChild(el);
+  });
+}
+
+function severityMark(m) {
+  if (!m.is_player_move) return "";
+  return { blunder: "??", mistake: "?", inaccuracy: "?!" }[m.severity] || "";
+}
+
+function goTo(ply) {
+  state.ply = Math.max(0, Math.min(ply, state.moves.length));
+  const m = state.ply === 0 ? null : state.moves[state.ply - 1];
+  renderBoard(m ? m.fen_after : START_FEN, m ? m.played_uci : null);
+  setEvalBar(m ? m.eval_after_cp : 0, m ? m.mate_in : null);
+  $("plyLabel").textContent = state.ply === 0
+    ? "start" : `${m.move_number}${m.side_to_move === "white" ? "." : "..."} ${m.played_san}`;
+  renderMoves();
+  if (state.tab === "move") renderTab();
+}
+
+/* ---- tabs -------------------------------------------------------------- */
+function esc(s) { const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; }
+
+function renderTab(html) {
+  if (html !== undefined) { $("tabBody").innerHTML = html; return; }
+  if (state.tab === "move") return renderMoveTab();
+  $("tabBody").innerHTML = '<span class="muted">Press the button above to generate.</span>';
+}
+
+function renderMoveTab() {
+  const body = $("tabBody");
+  if (state.ply === 0) {
+    body.innerHTML = '<span class="muted">Step to a move to explain it.</span>';
+    return;
+  }
+  const m = state.moves[state.ply - 1];
+  const key = m.fen_before_key;
+  const cached = state.cache[key];
+  const facts = `
+    <div class="card">
+      <h4>${esc(m.move_number)}${m.side_to_move === "white" ? "." : "..."} ${esc(m.played_san)}
+        <span class="sev-${esc(m.severity)}">${esc(severityMark(m) || "")}</span></h4>
+      <p class="muted">${m.cp_lost != null ? esc(m.cp_lost) + " centipawns lost" : "not scored"}
+        ${m.best_san ? " &middot; engine prefers <code>" + esc(m.best_san) + "</code>" : ""}</p>
+      ${m.best_line_san?.length ? '<p class="label">Engine line</p><p><code>' + esc(m.best_line_san.join(" ")) + "</code></p>" : ""}
+      ${m.tags?.length ? '<p class="label">' + m.tags.map(esc).join(" &middot; ") + "</p>" : ""}
+    </div>`;
+
+  if (cached) {
+    body.innerHTML = facts + `
+      <div class="card">
+        <h4>${esc(cached.headline)}</h4>
+        <p>${esc(cached.explanation)}</p>
+        <p class="label">Instead</p><p>${esc(cached.better_plan)}</p>
+        <p class="label">Concept</p><p>${esc(cached.concept)}</p>
+      </div>`;
+    return;
+  }
+  body.innerHTML = facts + '<button id="explainBtn">Explain this move</button>';
+  $("explainBtn").onclick = async () => {
+    const btn = $("explainBtn");
+    btn.disabled = true; btn.textContent = "Thinking…";
+    try {
+      const res = await api("/feedback/move", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fen: m.fen_before_key, move: m.played_uci, rating: state.rating }),
+      });
+      state.cache[key] = res.feedback;
+      renderMoveTab();
+    } catch (e) {
+      btn.disabled = false; btn.textContent = "Explain this move";
+      body.insertAdjacentHTML("beforeend", `<p class="err">${esc(e.message)}</p>`);
+    }
+  };
+}
+
+function timeControlHtml(advice, data) {
+  if (!advice || !advice.length) return "";
+  return '<p class="label">By time control</p>' + advice.map(a => {
+    const d = (data || {})[a.time_control] || {};
+    const acc = d.accuracy || {};
+    const sc = acc.severity_counts || {};
+    const stats = acc.average_centipawn_loss == null ? "" :
+      `<p class="muted">${esc(a.games)} games &middot; ${esc(acc.average_centipawn_loss)} avg cp loss
+       &middot; ${esc(sc.blunder || 0)} blunders${d.score_pct == null ? "" : " &middot; scored " + esc(d.score_pct) + "%"}
+       ${d.clock ? " &middot; " + esc(d.clock.average_seconds_per_move) + "s per move" : ""}</p>`;
+    return `<div class="card">
+      <h4>${esc(a.time_control)} <span class="muted">— ${esc(a.verdict)}</span></h4>
+      ${stats}<p>${esc(a.advice)}</p></div>`;
+  }).join("");
+}
+
+function openingsHtml(o, exits) {
+  if (!o) return "";
+  const rows = side => (o[side] || []).map(r =>
+    `<tr><td>${esc(r.opening)}</td><td class="muted">${esc(r.eco || "")}</td>
+     <td>${esc(r.games)}</td><td>${esc(r.score_pct)}%</td></tr>`).join("");
+  const table = side => (o[side] || []).length
+    ? `<table><thead><tr><th>${side === "as_white" ? "As White" : "As Black"}</th><th>ECO</th><th>Games</th><th>Score</th></tr></thead><tbody>${rows(side)}</tbody></table>`
+    : "";
+  let note = "";
+  if (!(o.as_white || []).length && !(o.as_black || []).length) {
+    note = `<p class="muted">${esc(o.distinct_openings)} distinct openings across
+      ${esc(o.games_total)} games — none repeated often enough to call a repertoire.
+      Analyze more games to see patterns here.</p>`;
+  }
+  const exitNote = exits && exits.unavailable
+    ? '<p class="muted">Opening explorer unavailable — no theory comparison.</p>' : "";
+  return table("as_white") + table("as_black") + note + exitNote;
+}
+
+function clockHtml(c) {
+  if (!c) return '<p class="muted">No clock data for these games.</p>';
+  const sev = c.average_seconds_by_severity || {};
+  const row = (label, v) => v == null ? "" : `<tr><td>${esc(label)}</td><td>${esc(v)}s</td></tr>`;
+  let html = `<table><tbody>
+    <tr><td>Average per move</td><td>${esc(c.average_seconds_per_move)}s</td></tr>
+    ${row("Before a blunder", sev.blunder)}${row("Before a mistake", sev.mistake)}
+    ${row("Before a good move", sev.ok)}</tbody></table>`;
+  const s = c.snap_moves, d = c.considered_moves;
+  if (s && d) {
+    html += `<p class="muted">Under ${esc(s.threshold_seconds)}s: ${esc(s.count)} moves,
+      ${esc(s.average_centipawn_loss)} avg cp lost, ${esc(s.blunders)} blunders.
+      Slower: ${esc(d.count)} moves, ${esc(d.average_centipawn_loss)} avg cp lost,
+      ${esc(d.blunders)} blunders.</p>`;
+  }
+  if (c.time_trouble) {
+    html += `<p class="muted">Under ${esc(c.time_trouble.below_seconds)}s on the clock:
+      ${esc(c.time_trouble.moves)} moves, ${esc(c.time_trouble.average_centipawn_loss)} avg cp lost.</p>`;
+  }
+  return html;
+}
+
+function conversionHtml(conv, missed) {
+  let html = "";
+  if (conv) {
+    html += `<p class="label">Conversion</p><p>Reached a winning position in
+      ${esc(conv.winning_positions_reached)} games and won
+      ${esc(conv.converted_to_wins)} of them (${esc(conv.conversion_rate_pct)}%).</p>`;
+  }
+  if (missed && missed.count) {
+    html += `<p class="label">Missed punishment</p><p>${esc(missed.count)} times your
+      opponent handed you a winning position and it slipped within a move.</p>` +
+      (missed.examples || []).slice(0, 3).map(m =>
+        `<div class="card"><p>After their <code>${esc(m.opponent_move)}</code> you were
+         +${esc(Math.round(m.advantage_offered_cp / 100))}; you played
+         <code>${esc(m.your_reply)}</code>${m.engine_wanted ? ", engine wanted <code>" + esc(m.engine_wanted) + "</code>" : ""}.</p></div>`).join("");
+  }
+  return html;
+}
+
+function statsHtml(s) {
+  return `<div>
+    <div class="stat"><b>${s.average_centipawn_loss ?? "--"}</b><span>avg cp loss</span></div>
+    <div class="stat"><b class="sev-blunder">${s.severity_counts.blunder}</b><span>blunders</span></div>
+    <div class="stat"><b class="sev-mistake">${s.severity_counts.mistake}</b><span>mistakes</span></div>
+    <div class="stat"><b class="sev-inaccuracy">${s.severity_counts.inaccuracy}</b><span>inaccuracies</span></div>
+  </div>`;
+}
+
+async function loadGameReview() {
+  if (!state.gameId) return renderTab('<span class="muted">Pick a game first.</span>');
+  renderTab('<span class="muted">Reviewing…</span>');
+  try {
+    const d = await api(`/feedback/game/${state.gameId}`);
+    const f = d.feedback;
+    renderTab(statsHtml(d.statistics) + `
+      <p>${esc(f.summary)}</p>
+      <p class="label">Critical moments</p>
+      ${f.critical_moments.map(c => `
+        <div class="card">
+          <h4><a href="#" onclick="goTo(${c.ply});return false;">${esc(c.move_san)}</a></h4>
+          <p>${esc(c.what_happened)}</p>
+          <p class="label">Better</p><p>${esc(c.better)}</p>
+        </div>`).join("")}
+      <p class="label">Takeaway</p><p>${esc(f.takeaway)}</p>`);
+  } catch (e) { renderTab(`<p class="err">${esc(e.message)}</p>`); }
+}
+
+async function loadOpenings() {
+  if (!state.jobId) return renderTab('<span class="muted">Run an analysis first.</span>');
+  try {
+    const list = await api(`/feedback/openings/${state.jobId}`);
+    if (!list.length) return renderTab('<span class="muted">No openings identified yet.</span>');
+    renderTab('<p class="label">Pick an opening to coach</p>' + list.map((o, i) =>
+      `<div class="card"><h4>${esc(o.opening)} <span class="muted">as ${esc(o.colour)}</span></h4>
+       <p class="muted">${esc(o.games)} game${o.games > 1 ? "s" : ""} &middot; scored
+       ${esc(o.score_pct)}% &middot; ${esc(o.eco || "")}</p>
+       <button data-open="${i}">Coach this opening</button></div>`).join(""));
+    document.querySelectorAll("[data-open]").forEach(btn => {
+      btn.onclick = () => coachOpening(list[+btn.dataset.open], btn);
+    });
+  } catch (e) { renderTab(`<p class="err">${esc(e.message)}</p>`); }
+}
+
+async function coachOpening(o, btn) {
+  btn.disabled = true; btn.textContent = "Thinking…";
+  try {
+    const q = `name=${encodeURIComponent(o.opening)}&colour=${encodeURIComponent(o.colour)}`;
+    const d = await api(`/feedback/opening/${state.jobId}?${q}`);
+    const f = d.feedback;
+    renderTab(`<h3>${esc(f.opening)} <span class="muted">as ${esc(o.colour)}</span></h3>
+      <p class="muted">${esc(f.theory_confidence)}</p>
+      <p class="label">The idea</p><p>${esc(f.the_idea)}</p>
+      <p class="label">Middlegame it aims for</p><p>${esc(f.typical_middlegame)}</p>
+      <p class="label">Pawn structure</p><p>${esc(f.pawn_structure)}</p>
+      <p class="label">Your version</p><p>${esc(f.your_version)}</p>
+      ${f.divergences.length ? '<p class="label">Where you parted from the plan</p>' : ""}
+      ${f.divergences.map(v => `<div class="card">
+        <h4>${esc(v.move)} — ${esc(v.what_you_played)}</h4>
+        <p class="label">The plan wants</p><p>${esc(v.what_the_plan_wants)}</p>
+        <p class="label">Engine</p><p>${esc(v.engine_note)}</p></div>`).join("")}
+      <p class="label">Focus</p><p>${esc(f.focus)}</p>
+      <p><button id="backToOpenings">&lsaquo; All openings</button></p>`);
+    $("backToOpenings").onclick = loadOpenings;
+  } catch (e) {
+    btn.disabled = false; btn.textContent = "Coach this opening";
+    btn.insertAdjacentHTML("afterend", `<p class="err">${esc(e.message)}</p>`);
+  }
+}
+
+async function loadReport() {
+  if (!state.jobId) return renderTab('<span class="muted">Run an analysis first.</span>');
+  renderTab('<span class="muted">Reading your games… this one takes a moment.</span>');
+  try {
+    const speed = $("speedFilter").value;
+    const d = await api(`/feedback/report/${state.jobId}${speed ? "?speed=" + encodeURIComponent(speed) : ""}`);
+    const f = d.feedback;
+    const themes = list => list.map(t => `
+      <div class="card">
+        <h4>${esc(t.title)}</h4>
+        <p>${esc(t.detail)}</p>
+        ${t.evidence?.length ? '<p class="label">Evidence</p><ul>' + t.evidence.map(e => `<li>${esc(e)}</li>`).join("") + "</ul>" : ""}
+      </div>`).join("");
+    renderTab(`<h3>${esc(f.headline)}</h3>` + statsHtml(d.statistics) + `
+      <p class="label">Working well</p>${themes(f.strengths)}
+      <p class="label">Costing you points</p>${themes(f.weaknesses)}
+      <p class="label">Openings</p><p>${esc(f.openings)}</p>${openingsHtml(d.openings, d.book_exits)}
+      <p class="label">Clock</p><p>${esc(f.clock)}</p>${clockHtml(d.clock)}
+      ${timeControlHtml(f.by_time_control, d.by_time_control)}
+      ${conversionHtml(d.conversion, d.missed_punishment)}
+      <p class="label">Drills</p><ul>${f.drills.map(x => `<li>${esc(x)}</li>`).join("")}</ul>`);
+  } catch (e) {
+    renderTab(`<p class="err">${esc(e.message)}</p>
+      <p class="muted">Nothing was saved, so retrying is safe once the cause is fixed.</p>`);
+  }
+}
+
+/* ---- games ------------------------------------------------------------- */
+async function loadGames() {
+  const games = await api(`/feedback/games/${state.jobId}`);
+  const list = $("gameList");
+  if (!games.length) { list.innerHTML = '<div class="body muted">No games found.</div>'; return; }
+  state.rating = games[0].user_rating;
+  const speeds = [...new Set(games.map(g => g.speed).filter(Boolean))].sort();
+  const filter = $("speedFilter");
+  if (filter.dataset.speeds !== speeds.join()) {
+    filter.dataset.speeds = speeds.join();
+    const keep = filter.value;
+    filter.innerHTML = '<option value="">All time controls</option>' +
+      speeds.map(sp => `<option value="${esc(sp)}">${esc(sp)} only</option>`).join("");
+    filter.value = keep;
+  }
+  list.innerHTML = "";
+  games.forEach(g => {
+    const el = document.createElement("div");
+    el.className = "game" + (g.analyzed ? "" : " pending");
+    if (state.gameId === g.game_id) el.classList.add("active");
+    const outcome = g.user_score === 1 ? "won" : g.user_score === 0 ? "lost" : "drew";
+    el.innerHTML = `<div>${esc(outcome)} as ${esc(g.user_color)}${g.analyzed ? "" : ' <span class="vs">analyzing…</span>'}</div>
+      <div class="vs">vs ${esc(g.opponent || "?")} ${g.opponent_rating ? "(" + esc(g.opponent_rating) + ")" : ""} &middot; ${esc(g.speed || "")}</div>`;
+    if (g.analyzed) {
+      el.onclick = () => { document.querySelectorAll(".game").forEach(x => x.classList.remove("active"));
+                           el.classList.add("active"); openGame(g.game_id); };
+    }
+    list.appendChild(el);
+  });
+}
+
+async function openGame(gameId) {
+  state.gameId = gameId;
+  try {
+    const d = await api(`/feedback/game/${gameId}/moves`);
+    // The move endpoint needs the position before the move; derive it from the
+    // previous ply's resulting position (or the start position for ply 1).
+    state.moves = d.moves.map((m, i) => ({
+      ...m, fen_before_key: i === 0 ? START_FEN : d.moves[i - 1].fen_after,
+    }));
+    goTo(0);
+    if (state.tab === "game") loadGameReview();
+  } catch (e) { renderTab(`<p class="err">${esc(e.message)}</p>`); }
+}
+
+/* ---- job --------------------------------------------------------------- */
+async function runAnalysis() {
+  const username = $("username").value.trim();
+  if (!username) return;
+  $("analyze").disabled = true;
+  $("status").textContent = "queued…";
+  try {
+    const { job_id } = await api("/jobs/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        platform: $("platform").value, username, max_games: +$("maxGames").value,
+      }),
+    });
+    state.jobId = job_id;
+    await pollJob();
+  } catch (e) {
+    $("status").innerHTML = `<span class="err">${esc(e.message)}</span>`;
+    $("analyze").disabled = false;
+  }
+}
+
+async function pollJob() {
+  const job = await api(`/jobs/${state.jobId}`);
+  $("status").textContent = `${job.status} — ${job.games_done}/${job.games_total || "?"} games`;
+  // games rows are written before their plies are walked, so poll them every tick
+  // rather than waiting for a whole game to complete.
+  await loadGames();
+  // The report reads patterns across whole games; offering it mid-run invites a
+  // full-price call on partial data.
+  $("reportBtn").disabled = job.status !== "done";
+  $("reportBtn").title = job.status === "done" ? "" : "Available when analysis finishes";
+  if (job.status === "running" || job.status === "queued") {
+    setTimeout(pollJob, 2000);
+  } else {
+    $("analyze").disabled = false;
+    if (job.status === "error") $("status").innerHTML = `<span class="err">${esc(job.error)}</span>`;
+  }
+}
+
+/* ---- wiring ------------------------------------------------------------ */
+$("analyze").onclick = runAnalysis;
+$("username").onkeydown = e => { if (e.key === "Enter") runAnalysis(); };
+$("reportBtn").onclick = () => { selectTab("report"); loadReport(); };
+$("first").onclick = () => goTo(0);
+$("prev").onclick = () => goTo(state.ply - 1);
+$("next").onclick = () => goTo(state.ply + 1);
+$("last").onclick = () => goTo(state.moves.length);
+document.onkeydown = e => {
+  if (document.activeElement.tagName === "INPUT") return;
+  if (e.key === "ArrowLeft") goTo(state.ply - 1);
+  if (e.key === "ArrowRight") goTo(state.ply + 1);
+};
+
+function selectTab(tab) {
+  state.tab = tab;
+  document.querySelectorAll(".tabs button").forEach(b =>
+    b.classList.toggle("active", b.dataset.tab === tab));
+}
+document.querySelectorAll(".tabs button").forEach(btn => {
+  btn.onclick = () => {
+    selectTab(btn.dataset.tab);
+    if (btn.dataset.tab === "game") loadGameReview();
+    else if (btn.dataset.tab === "openings") loadOpenings();
+    else if (btn.dataset.tab === "report") loadReport();
+    else renderTab();
+  };
+});
+
+renderBoard(START_FEN, null);
+</script>
+</body>
+</html>
