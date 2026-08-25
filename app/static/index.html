@@ -8,108 +8,316 @@
   /* No CDN, no build step, no dependencies -- the board is drawn from the FEN
      with CSS grid and unicode pieces, so this works with the network down. */
   :root {
-    --bg: #16161a; --panel: #1e1e24; --line: #2e2e37; --ink: #e8e8ea;
-    --dim: #9a9aa4; --accent: #7aa2f7; --light: #b9a37e; --dark: #6d5540;
-    --blunder: #e05252; --mistake: #e0913f; --inaccuracy: #d8c141; --good: #6cb86c;
+    --bg: #131317; --panel: #1b1b21; --raised: #23232c; --line: #2c2c36;
+    --ink: #ecedf1; --ink-2: #a8a9b6; --dim: #74757f;
+    --accent: #7aa2f7; --accent-ink: #0f1220;
+    /* The classic Wikipedia/lichess brown. The Cburnett pieces below were drawn
+       against these two squares, which is why they read cleanly on them. */
+    --light: #f0d9b5; --dark: #b58863;
+    --hl: rgba(255, 206, 84, .52); --arrow: rgba(90, 150, 60, .78); --check: #e0403a;
+    /* Severity is a status scale, not a series palette: the four steps are
+       validated for adjacent separation (normal-vision dE 15.2, worst CVD pair
+       10.8) against this panel surface, and every use pairs the colour with a
+       label or a ?/?!/?? mark so the hue never carries the meaning alone. */
+    --blunder: #f0555f; --mistake: #f59332; --inaccuracy: #e8d44d; --good: #42b95a;
+    --radius: 10px;
   }
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--ink);
     font: 14px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   }
+  h1, h2, h3, h4 { margin: 0; font-weight: 600; }
+
+  /* ---- header ----------------------------------------------------------- */
   header {
+    position: sticky; top: 0; z-index: 20;
     display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
-    padding: 14px 18px; border-bottom: 1px solid var(--line); background: var(--panel);
+    padding: 12px 18px; border-bottom: 1px solid var(--line); background: var(--panel);
   }
-  h1 { font-size: 15px; margin: 0 14px 0 0; font-weight: 600; letter-spacing: .02em; }
+  .brand { font-size: 14px; margin-right: 10px; letter-spacing: .01em; }
+  .brand span { color: var(--accent); }
   input, select, button {
-    font: inherit; color: var(--ink); background: #26262e;
-    border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px;
+    font: inherit; color: var(--ink); background: var(--raised);
+    border: 1px solid var(--line); border-radius: 7px; padding: 6px 10px;
   }
-  input { width: 150px; }
-  input[type=number] { width: 74px; }
+  input { width: 148px; }
+  input[type=number] { width: 68px; }
+  input:focus-visible, select:focus-visible, button:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 1px;
+  }
   button { cursor: pointer; }
   button:hover:not(:disabled) { border-color: var(--accent); }
-  button:disabled { opacity: .45; cursor: default; }
-  button.primary { background: var(--accent); color: #10131c; border-color: var(--accent); font-weight: 600; }
-  #status { color: var(--dim); margin-left: 4px; }
+  button:disabled { opacity: .4; cursor: default; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+  .spacer { flex: 1; }
+  #status { color: var(--ink-2); font-size: 13px; }
+  /* Determinate progress: the job reports games_done/games_total, so this is a
+     real fraction rather than a spinner that says only "something is happening". */
+  #progress { height: 2px; background: transparent; }
+  #progressBar { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
 
-  main { display: grid; grid-template-columns: 230px minmax(320px, 460px) 1fr; gap: 16px; padding: 16px; align-items: start; }
-  @media (max-width: 1000px) { main { grid-template-columns: 1fr; } }
-  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
-  .panel h2 {
-    font-size: 11px; text-transform: uppercase; letter-spacing: .09em; color: var(--dim);
-    margin: 0; padding: 10px 12px; border-bottom: 1px solid var(--line); font-weight: 600;
+  main {
+    display: grid; gap: 14px; padding: 14px; align-items: start;
+    grid-template-columns: 268px minmax(330px, 470px) minmax(400px, 1fr);
   }
-  .scroll { max-height: 62vh; overflow-y: auto; }
+  @media (max-width: 1180px) { main { grid-template-columns: 240px 1fr; } .col-analysis { grid-column: 1 / -1; } }
+  @media (max-width: 760px) { main { grid-template-columns: 1fr; } .col-analysis { grid-column: auto; } }
 
-  .game { padding: 9px 12px; border-bottom: 1px solid var(--line); cursor: pointer; font-size: 13px; }
-  .game:hover { background: #26262e; }
-  .game.active { background: #2b3350; }
-  .game.pending { opacity: .5; cursor: default; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+  .phead {
+    display: flex; align-items: center; gap: 8px;
+    padding: 9px 12px; border-bottom: 1px solid var(--line);
+  }
+  .phead h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .09em; color: var(--dim);
+  }
+  .phead .count { margin-left: auto; color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .scroll { overflow-y: auto; }
+  .icon-btn { padding: 3px 8px; font-size: 12px; line-height: 1.4; }
+
+  /* ---- games list ------------------------------------------------------- */
+  #gameList { max-height: calc(100vh - 140px); }
+  .game {
+    display: grid; grid-template-columns: auto 1fr; gap: 2px 9px;
+    padding: 9px 12px; border-bottom: 1px solid var(--line); cursor: pointer;
+    border-left: 3px solid transparent;
+  }
+  .game:hover { background: var(--raised); }
+  .game.active { background: #262b3d; border-left-color: var(--accent); }
+  .game.pending { opacity: .45; cursor: default; }
   .game.pending:hover { background: transparent; }
-  .game .vs { color: var(--dim); font-size: 12px; }
+  /* The number is the anchor between the sidebar, the AI's prose, and the
+     citation links -- "Game 3" everywhere means this row. */
+  .gnum {
+    grid-row: span 2; align-self: start; margin-top: 1px;
+    font-size: 11px; font-variant-numeric: tabular-nums; color: var(--dim);
+    background: var(--raised); border-radius: 5px; padding: 2px 6px; min-width: 26px; text-align: center;
+  }
+  .game.active .gnum { color: var(--ink); }
+  .gtop { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+  .gtop .who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+  /* One line, always. Letting the opening name wrap made every third row two
+     lines tall and the list impossible to scan; the name gets the ellipsis
+     because the speed and the date are short and fixed-width. */
+  .gmeta {
+    color: var(--dim); font-size: 11.5px; display: flex; gap: 6px;
+    flex-wrap: nowrap; overflow: hidden; white-space: nowrap;
+  }
+  .gmeta .opening { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .gmeta .when { margin-left: auto; padding-left: 4px; flex: none; }
+  .chip {
+    font-size: 10px; font-weight: 700; letter-spacing: .04em; border-radius: 4px;
+    padding: 1px 5px; flex: none;
+  }
+  .chip.w { background: rgba(66,185,90,.16); color: var(--good); }
+  .chip.l { background: rgba(240,85,95,.16); color: var(--blunder); }
+  .chip.d { background: rgba(168,169,182,.16); color: var(--ink-2); }
 
-  /* Board */
-  #board { display: grid; grid-template-columns: repeat(8, 1fr); aspect-ratio: 1; width: 100%; }
+  /* ---- board ------------------------------------------------------------ */
+  .seat {
+    display: flex; align-items: center; gap: 8px; padding: 7px 12px; font-size: 13px;
+    border-bottom: 1px solid var(--line);
+  }
+  /* The near player sits directly under the board, not below the move list --
+     the two seats have to bracket the board for the orientation to read. */
+  .seat.bottom { border-bottom: 0; border-top: 1px solid var(--line); }
+  .seat .dot { width: 9px; height: 9px; border-radius: 50%; border: 1px solid #0006; flex: none; }
+  .seat .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .seat .rating { color: var(--dim); font-variant-numeric: tabular-nums; }
+  .seat .you { font-size: 10px; letter-spacing: .06em; color: var(--accent); text-transform: uppercase; }
+  .seat .clock { margin-left: auto; color: var(--ink-2); font-variant-numeric: tabular-nums; font-size: 12px; }
+
+  .boardwrap { display: grid; grid-template-columns: 13px 1fr; gap: 9px; padding: 10px 12px; }
+  /* Vertical eval bar beside the board, the way every analysis board shows it.
+     Purely a meter -- the number lives in the nav row below, where there is room
+     to set it at a legible size instead of squeezing it into 13px of gutter. */
+  #evalWrap {
+    position: relative; background: #0c0c0f; border-radius: 4px; overflow: hidden;
+    display: flex; flex-direction: column; justify-content: flex-end;
+  }
+  /* Flipping the board moves White to the top, so the white fill has to anchor
+     there too. Inverting the height instead would leave White's share drawn on
+     Black's side of the bar, at Black's magnitude. */
+  #evalWrap.flip { justify-content: flex-start; }
+  #evalBar { background: #e9e9ec; height: 50%; transition: height .18s; }
+  #evalNum {
+    font-variant-numeric: tabular-nums; font-weight: 700; font-size: 12.5px;
+    background: var(--raised); border-radius: 5px; padding: 4px 8px; min-width: 48px; text-align: center;
+  }
+
+  /* Rows are pinned to 1fr as well as columns. Without an explicit row track the
+     grid sizes each row to its tallest child, so a rank holding pieces grows and
+     an empty rank collapses -- the squares visibly breathe as you step through. */
+  #board {
+    display: grid; grid-template-columns: repeat(8, 1fr); grid-template-rows: repeat(8, 1fr);
+    aspect-ratio: 1; border-radius: 4px; overflow: hidden;
+  }
   #board div {
-    display: flex; align-items: center; justify-content: center;
-    font-size: clamp(22px, 4.4vw, 40px); line-height: 1; user-select: none;
+    position: relative; display: flex; align-items: center; justify-content: center;
+    min-width: 0; min-height: 0; user-select: none;
   }
   .sq-l { background: var(--light); } .sq-d { background: var(--dark); }
+
+  /* Real piece artwork, referenced out of an inlined sprite. The unicode glyphs
+     this replaces had no white pieces of their own -- they were the black glyph
+     recoloured, which is why they looked thin and varied by system font. */
+  .pc { width: 88%; height: 88%; display: block; pointer-events: none;
+        filter: drop-shadow(0 1.5px 1px rgba(0,0,0,.3)); }
+  .glyph { font-size: 82%; line-height: 1; }
   .piece-w { color: #fff; text-shadow: 0 0 2px #000, 0 1px 2px #0008; }
-  .piece-b { color: #1a1a1a; text-shadow: 0 0 2px #fff6; }
-  .hl { box-shadow: inset 0 0 0 3px var(--accent); }
-  .nav { display: flex; gap: 6px; padding: 10px; border-top: 1px solid var(--line); align-items: center; }
-  .nav button { padding: 5px 12px; }
-  #plyLabel { margin-left: auto; color: var(--dim); font-variant-numeric: tabular-nums; font-size: 13px; }
+  .piece-b { color: #191919; text-shadow: 0 0 2px #fff5; }
 
-  /* Eval bar */
-  #evalWrap { height: 8px; background: #111; position: relative; }
-  #evalBar { height: 100%; background: #e8e8ea; width: 50%; transition: width .18s; }
-
-  /* Move list */
-  .moves { display: flex; flex-wrap: wrap; gap: 2px; padding: 8px; }
-  .mv {
-    padding: 2px 7px; border-radius: 4px; cursor: pointer; font-size: 13px;
-    font-variant-numeric: tabular-nums; border: 1px solid transparent;
+  /* The last move is a translucent wash rather than a ring: a ring on both
+     squares competes with the piece sitting inside it. */
+  .hl::after { content: ""; position: absolute; inset: 0; background: var(--hl); }
+  /* A king in check gets a radial bloom, so it reads even under the piece. */
+  .chk::after {
+    content: ""; position: absolute; inset: 0;
+    background: radial-gradient(circle, var(--check) 12%, rgba(224,64,58,.55) 42%, transparent 74%);
   }
-  .mv:hover { background: #2c2c36; }
-  .mv.active { background: var(--accent); color: #10131c; font-weight: 600; }
-  .mv.own { font-weight: 500; }
-  .num { color: var(--dim); padding: 2px 2px 2px 8px; font-size: 12px; }
-  .sev-blunder { color: var(--blunder); } .sev-mistake { color: var(--mistake); }
-  .sev-inaccuracy { color: var(--inaccuracy); }
+  .coord {
+    position: absolute; font-size: 9.5px; font-weight: 700; opacity: .85; line-height: 1;
+    font-family: ui-monospace, monospace; z-index: 2;
+  }
+  .coord.file { right: 3px; bottom: 2px; } .coord.rank { left: 3px; top: 2px; }
+  .sq-l .coord { color: var(--dark); } .sq-d .coord { color: var(--light); }
 
-  .tabs { display: flex; border-bottom: 1px solid var(--line); }
+  /* Board and arrow layer share one square stacking context. */
+  .boardstack { position: relative; }
+  #arrows { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 3; }
+  #arrowToggle.off { opacity: .45; }
+
+  .nav { display: flex; gap: 5px; padding: 0 12px 10px; align-items: center; }
+  .nav button { padding: 5px 11px; }
+  #plyLabel { margin-left: auto; color: var(--ink-2); font-variant-numeric: tabular-nums; font-size: 13px; }
+
+  /* Move list as a real grid: a wrapped inline run makes it impossible to scan
+     down one player's moves, which is the thing you actually want to do. */
+  /* position:relative so a row's offsetTop is measured against this box -- the
+     auto-scroll below reads it, and without it the numbers come from the panel. */
+  #moveList { position: relative; max-height: 30vh; border-top: 1px solid var(--line); padding: 4px 0; }
+  .mrow { display: grid; grid-template-columns: 2.6em 1fr 1fr; align-items: stretch; }
+  .mrow:nth-child(odd) { background: #ffffff05; }
+  .mnum { color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums; padding: 3px 6px; text-align: right; }
+  .mv {
+    padding: 3px 8px; cursor: pointer; font-size: 13px; font-variant-numeric: tabular-nums;
+    border-radius: 4px; margin: 1px 2px;
+  }
+  .mv:hover { background: var(--raised); }
+  .mv.active { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  .mv.own { font-weight: 500; }
+  .mv.empty { cursor: default; }
+  .mv.empty:hover { background: transparent; }
+  .sev-blunder { color: var(--blunder); } .sev-mistake { color: var(--mistake); }
+  .sev-inaccuracy { color: var(--inaccuracy); } .sev-ok { color: var(--good); }
+  .mv.active.sev-blunder, .mv.active.sev-mistake, .mv.active.sev-inaccuracy { color: var(--accent-ink); }
+
+  /* ---- analysis panel --------------------------------------------------- */
+  .tabs { display: flex; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel); z-index: 5; }
   .tabs button {
     flex: 1; border: 0; border-radius: 0; background: transparent; color: var(--dim);
-    padding: 9px; font-size: 12px; text-transform: uppercase; letter-spacing: .07em;
+    padding: 10px 6px; font-size: 11.5px; text-transform: uppercase; letter-spacing: .07em;
   }
+  .tabs button:hover { color: var(--ink-2); }
   .tabs button.active { color: var(--ink); box-shadow: inset 0 -2px 0 var(--accent); }
-  .body { padding: 14px; }
-  .stat { display: inline-block; margin: 0 16px 10px 0; }
-  .stat b { display: block; font-size: 19px; font-variant-numeric: tabular-nums; }
-  .stat span { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
-  .card { border: 1px solid var(--line); border-radius: 8px; padding: 11px 13px; margin-bottom: 10px; }
-  .card h4 { margin: 0 0 5px; font-size: 13px; }
-  .card p { margin: 0 0 6px; }
-  .label { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--dim); }
+  #tabBody { padding: 14px 16px; max-height: calc(100vh - 140px); }
+
+  /* Section rhythm: an eyebrow label, then its content. Every block in the
+     report uses the same two pieces so the document scans at a glance. */
+  .label {
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim);
+    font-weight: 600; margin: 18px 0 7px;
+  }
+  .label:first-child { margin-top: 0; }
+  p { margin: 0 0 9px; }
+  p:last-child { margin-bottom: 0; }
   .muted { color: var(--dim); }
-  code { background: #26262e; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
-  ul { margin: 6px 0; padding-left: 20px; }
-  table { width: 100%; border-collapse: collapse; margin: 6px 0 10px; font-size: 13px; }
-  th { text-align: left; font-weight: 500; color: var(--dim); font-size: 11px;
-       text-transform: uppercase; letter-spacing: .06em; padding: 4px 6px; }
-  td { padding: 4px 6px; border-top: 1px solid var(--line); }
-  td:last-child, th:last-child { text-align: right; }
   .err { color: var(--blunder); }
+  .headline { font-size: 17px; line-height: 1.35; margin-bottom: 12px; }
+
+  .card { background: var(--raised); border-radius: 8px; padding: 11px 13px; margin-bottom: 9px; }
+  .card h4 { font-size: 13px; margin-bottom: 5px; }
+  .card:last-child { margin-bottom: 0; }
+  .card.rule { background: transparent; border: 1px solid var(--line); }
+
+  /* Scorecard. Stat tiles, not a chart -- four unrelated magnitudes with no
+     shared scale is exactly the case a chart makes worse. */
+  .scorecard { display: grid; grid-template-columns: repeat(auto-fit, minmax(88px, 1fr)); gap: 8px; margin-bottom: 4px; }
+  .tile { background: var(--raised); border-radius: 8px; padding: 9px 11px; }
+  .tile b { display: block; font-size: 21px; font-variant-numeric: tabular-nums; line-height: 1.15; font-weight: 600; }
+  .tile span { color: var(--dim); font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; }
+  .tile em { display: block; margin-top: 3px; font-style: normal; font-size: 11px;
+             color: var(--ink-2); font-variant-numeric: tabular-nums; }
+
+  /* Rate bars. One measure (blunder rate) across several groupings, so every bar
+     in the block shares a single scale -- phase against clock against position
+     state is the comparison worth making, and per-group scaling would destroy it.
+     The tick marks the player's overall rate, so each row reads as above or below
+     their own average rather than against an abstract zero. */
+  .rategroup { margin-bottom: 12px; }
+  .rategroup > p { font-size: 11.5px; color: var(--ink-2); margin: 0 0 5px; }
+  .rate { display: grid; grid-template-columns: 8.5em 1fr 3.2em 3.6em; align-items: center; gap: 8px; padding: 2.5px 0; }
+  .rlabel { font-size: 12px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rtrack { position: relative; height: 9px; background: #ffffff0f; border-radius: 3px; }
+  .rfill { display: block; height: 100%; background: var(--blunder); border-radius: 3px; min-width: 2px; }
+  /* Near-white so it stays visible where it crosses a filled bar, which is
+     exactly the case that matters: those are the buckets above average. */
+  .rtick { position: absolute; top: -2px; bottom: -2px; width: 1px; background: #f2f3f7; opacity: .8; }
+  .rval { font-size: 12px; font-variant-numeric: tabular-nums; text-align: right; }
+  .rn { font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; text-align: right; }
+  .scale { font-size: 10.5px; color: var(--dim); margin-top: 6px; }
+  /* Enrichment is a verdict, so the number is always paired with the word -- an
+     over/under call must never rest on the colour alone. */
+  .verdict { color: var(--dim); }
+  .verdict.over { color: var(--blunder); }
+  .verdict.under { color: var(--good); }
+
+  code { background: var(--raised); padding: 1px 5px; border-radius: 4px; font-size: 12.5px;
+         font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  ul { margin: 6px 0; padding-left: 19px; }
+  li { margin-bottom: 4px; }
+  table { width: 100%; border-collapse: collapse; margin: 4px 0 2px; font-size: 13px; }
+  th { text-align: left; font-weight: 500; color: var(--dim); font-size: 10.5px;
+       text-transform: uppercase; letter-spacing: .06em; padding: 4px 6px; }
+  td { padding: 4px 6px; border-top: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+  td:first-child, th:first-child { font-variant-numeric: normal; }
+  td:last-child, th:last-child { text-align: right; }
+
+  /* Supporting numbers collapse by default: the prose is the report, the tables
+     are the evidence you open when you doubt a sentence. */
+  details { border-top: 1px solid var(--line); margin-top: 8px; }
+  details summary {
+    cursor: pointer; padding: 7px 0; font-size: 11.5px; color: var(--dim);
+    letter-spacing: .04em; list-style: none;
+  }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::before { content: "▸ "; display: inline-block; width: 1em; }
+  details[open] summary::before { content: "▾ "; }
+  details summary:hover { color: var(--ink-2); }
+  details > :last-child { margin-bottom: 10px; }
+  /* A four-column table does not fit the analysis column on a narrow window, and
+     the panel must not be what gives way -- the table scrolls inside itself. */
+  .tablewrap { overflow-x: auto; }
+  .tablewrap table { min-width: 340px; }
+
+  /* Citation chip: the model writes [G3#47], the server resolves it to a game
+     and a ply, and this is what the reader clicks to land on that position. */
+  .cite {
+    display: inline; color: var(--accent); background: rgba(122,162,247,.11);
+    border-bottom: 1px solid rgba(122,162,247,.4); border-radius: 3px;
+    padding: 0 3px; cursor: pointer; text-decoration: none;
+    font-size: 12.5px; font-variant-numeric: tabular-nums; white-space: nowrap;
+  }
+  .cite:hover { background: rgba(122,162,247,.24); border-bottom-color: var(--accent); }
+  .ext { color: var(--dim); font-size: 12px; text-decoration: none; }
+  .ext:hover { color: var(--accent); }
 </style>
 </head>
 <body>
 
 <header>
-  <h1>Chess Analyzer</h1>
+  <h1 class="brand">Chess <span>Analyzer</span></h1>
   <select id="platform">
     <option value="chesscom">Chess.com</option>
     <option value="lichess">Lichess</option>
@@ -117,49 +325,64 @@
   <input id="username" placeholder="username" autocomplete="off">
   <input id="maxGames" type="number" value="10" min="1" max="100" title="games to analyze">
   <button class="primary" id="analyze">Analyze</button>
+  <span class="spacer"></span>
   <select id="speedFilter" title="limit the report to one time control">
     <option value="">All time controls</option>
   </select>
   <button id="reportBtn" disabled>Coaching report</button>
   <span id="status"></span>
 </header>
+<div id="progress"><div id="progressBar"></div></div>
 
 <main>
   <section class="panel">
-    <h2>Games</h2>
-    <div class="scroll" id="gameList"><div class="body muted">Run an analysis to begin.</div></div>
+    <div class="phead"><h2>Games</h2><span class="count" id="gameCount"></span></div>
+    <div class="scroll" id="gameList"><div style="padding:14px" class="muted">Run an analysis to begin.</div></div>
   </section>
 
   <section class="panel">
-    <h2>Board</h2>
-    <div id="evalWrap"><div id="evalBar"></div></div>
-    <div id="board"></div>
+    <div class="seat" id="seatTop"><span class="muted">Board</span></div>
+    <div class="boardwrap">
+      <div id="evalWrap"><div id="evalBar"></div></div>
+      <div class="boardstack">
+        <div id="board"></div>
+        <svg id="arrows" viewBox="0 0 8 8" preserveAspectRatio="none" aria-hidden="true"></svg>
+      </div>
+    </div>
+    <div class="seat bottom" id="seatBottom"></div>
     <div class="nav">
-      <button id="first">&laquo;</button>
-      <button id="prev">&lsaquo;</button>
-      <button id="next">&rsaquo;</button>
-      <button id="last">&raquo;</button>
+      <button id="first" title="Start">&laquo;</button>
+      <button id="prev" title="Previous (←)">&lsaquo;</button>
+      <button id="next" title="Next (→)">&rsaquo;</button>
+      <button id="last" title="End">&raquo;</button>
+      <button id="flip" class="icon-btn" title="Flip board">⇅</button>
+      <button id="arrowToggle" class="icon-btn" title="Show the engine's move for this position">➔</button>
+      <span id="evalNum">0.0</span>
       <span id="plyLabel">--</span>
     </div>
-    <div class="moves scroll" id="moveList"></div>
+    <div class="scroll" id="moveList"></div>
   </section>
 
-  <section class="panel">
+  <section class="panel col-analysis">
     <div class="tabs">
       <button data-tab="move" class="active">This move</button>
       <button data-tab="game">Game review</button>
       <button data-tab="openings">Openings</button>
       <button data-tab="report">Report</button>
     </div>
-    <div class="body scroll" id="tabBody"><span class="muted">Pick a game, then step to a move.</span></div>
+    <div class="scroll" id="tabBody"><span class="muted">Pick a game, then step to a move.</span></div>
   </section>
 </main>
 
 <script>
 const START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -";
 const GLYPHS = { p:"♟", n:"♞", b:"♝", r:"♜", q:"♛", k:"♚" };
+const MARKS = { blunder: "??", mistake: "?", inaccuracy: "?!" };
 
-const state = { jobId: null, gameId: null, moves: [], ply: 0, tab: "move", cache: {} };
+const state = {
+  jobId: null, gameId: null, game: null, moves: [], ply: 0, tab: "move",
+  cache: {}, games: [], flipped: false, cites: {}, rating: null, showArrow: true,
+};
 const $ = id => document.getElementById(id);
 
 async function api(path, options) {
@@ -169,89 +392,238 @@ async function api(path, options) {
   return data;
 }
 
-/* ---- board ------------------------------------------------------------- */
-function renderBoard(fen, lastMove) {
-  const rows = fen.split(" ")[0].split("/");
-  const board = $("board");
-  board.innerHTML = "";
-  rows.forEach((row, r) => {
-    let file = 0;
-    for (const ch of row) {
-      if (/\d/.test(ch)) {
-        for (let i = 0; i < +ch; i++) drawSquare(board, r, file++, null, lastMove);
-      } else {
-        drawSquare(board, r, file++, ch, lastMove);
-      }
-    }
+function esc(s) { const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; }
+
+/* ---- citations ----------------------------------------------------------
+   The server hands back prose containing [[c0]] markers plus a citations list
+   resolving each one to a game and a ply. Rendering them here rather than
+   letting the model emit links keeps every link pointing at a game that
+   actually exists. */
+const CITE_RE = /\[\[(c\d+)\]\]/g;
+
+function setCites(list) {
+  state.cites = Object.fromEntries((list || []).map(c => [c.id, c]));
+}
+
+function rich(text) {
+  return esc(text).replace(CITE_RE, (_, id) => {
+    const c = state.cites[id];
+    if (!c) return "";
+    const where = c.ply ? ` at ply ${c.ply}` : "";
+    return `<a class="cite" href="#" data-cite="${id}" title="${esc(c.description + where)}">${esc(c.text)}</a>`;
   });
 }
 
-function drawSquare(board, rank, file, piece, lastMove) {
-  const cell = document.createElement("div");
-  cell.className = (rank + file) % 2 === 0 ? "sq-l" : "sq-d";
-  const name = "abcdefgh"[file] + (8 - rank);
-  if (lastMove && (lastMove.slice(0, 2) === name || lastMove.slice(2, 4) === name)) {
-    cell.classList.add("hl");
-  }
-  if (piece) {
-    cell.textContent = GLYPHS[piece.toLowerCase()];
-    cell.classList.add(piece === piece.toUpperCase() ? "piece-w" : "piece-b");
-  }
-  board.appendChild(cell);
+document.addEventListener("click", event => {
+  const link = event.target.closest("[data-cite]");
+  if (!link) return;
+  event.preventDefault();
+  const c = state.cites[link.dataset.cite];
+  if (c) openGame(c.game_id, c.ply || 0);
+});
+
+/* ---- board -------------------------------------------------------------
+   Pieces come from a sprite of the Cburnett/Wikimedia SVG set (CC BY-SA 3.0),
+   inlined once so every square is a <use> reference rather than a network
+   request. Injected rather than linked because an external <use href="file#id">
+   is subject to CORS and fails outright from a file:// origin; if the fetch
+   fails for any reason the unicode glyphs remain as a fallback. */
+let spriteReady = false;
+
+async function loadPieces() {
+  try {
+    const markup = await (await fetch("/static/pieces.svg")).text();
+    const holder = document.createElement("div");
+    holder.hidden = true;
+    holder.innerHTML = markup;
+    document.body.appendChild(holder);
+    spriteReady = !!document.getElementById("wk");
+  } catch { spriteReady = false; }
 }
 
-function setEvalBar(cp, mate) {
-  let pct = 50;
-  if (mate != null) pct = mate > 0 ? 100 : 0;
-  else if (cp != null) pct = 100 / (1 + Math.exp(-cp / 320));
-  $("evalBar").style.width = pct + "%";
+function pieceHtml(ch) {
+  const white = ch === ch.toUpperCase();
+  if (spriteReady) {
+    return `<svg class="pc" viewBox="0 0 40 40"><use href="#${white ? "w" : "b"}${ch.toLowerCase()}"/></svg>`;
+  }
+  return `<span class="glyph ${white ? "piece-w" : "piece-b"}">${GLYPHS[ch.toLowerCase()]}</span>`;
+}
+
+function renderBoard(fen, lastMove, checkedKing) {
+  const rows = fen.split(" ")[0].split("/");
+  const squares = [];
+  rows.forEach((row, rank) => {
+    let file = 0;
+    for (const ch of row) {
+      if (/\d/.test(ch)) { for (let i = 0; i < +ch; i++) squares.push([rank, file++, null]); }
+      else squares.push([rank, file++, ch]);
+    }
+  });
+  if (state.flipped) squares.reverse();
+
+  const cells = [];
+  for (const [rank, file, piece] of squares) {
+    const name = "abcdefgh"[file] + (8 - rank);
+    const classes = [(rank + file) % 2 === 0 ? "sq-l" : "sq-d"];
+    if (lastMove && (lastMove.slice(0, 2) === name || lastMove.slice(2, 4) === name)) classes.push("hl");
+    if (checkedKing === name) classes.push("chk");
+    // Coordinates ride the outer edge of the board as it is currently oriented.
+    const edgeRank = state.flipped ? rank === 0 : rank === 7;
+    const edgeFile = state.flipped ? file === 7 : file === 0;
+    cells.push(`<div class="${classes.join(" ")}">
+      ${edgeRank ? `<span class="coord file">${name[0]}</span>` : ""}
+      ${edgeFile ? `<span class="coord rank">${name[1]}</span>` : ""}
+      ${piece ? pieceHtml(piece) : ""}</div>`);
+  }
+  $("board").innerHTML = cells.join("");
+}
+
+/* Where the engine's king sits when the move just played gave check. Derived
+   from the FEN's active colour rather than tracked, so it cannot drift. */
+function checkedKingSquare(fen, gaveCheck) {
+  if (!gaveCheck) return null;
+  const target = fen.split(" ")[1] === "w" ? "K" : "k";
+  const rows = fen.split(" ")[0].split("/");
+  for (let rank = 0; rank < 8; rank++) {
+    let file = 0;
+    for (const ch of rows[rank]) {
+      if (/\d/.test(ch)) file += +ch;
+      else if (ch === target) return "abcdefgh"[file] + (8 - rank);
+      else file++;
+    }
+  }
+  return null;
+}
+
+/* ---- engine arrow ------------------------------------------------------ */
+function squareCentre(name) {
+  let file = "abcdefgh".indexOf(name[0]);
+  let rank = 8 - +name[1];
+  if (state.flipped) { file = 7 - file; rank = 7 - rank; }
+  return [file + 0.5, rank + 0.5];
+}
+
+// Drawn as one polygon rather than a line plus an SVG marker: markers scale off
+// stroke-width and get unreliable once the board is resized by a flex parent.
+function renderArrow(uci) {
+  const svg = $("arrows");
+  if (!state.showArrow || !uci || uci.length < 4) { svg.innerHTML = ""; return; }
+
+  const [x1, y1] = squareCentre(uci.slice(0, 2));
+  const [x2, y2] = squareCentre(uci.slice(2, 4));
+  const dx = x2 - x1, dy = y2 - y1;
+  const length = Math.hypot(dx, dy);
+  if (!length) { svg.innerHTML = ""; return; }
+
+  const ux = dx / length, uy = dy / length;
+  const px = -uy, py = ux;                       // unit perpendicular
+  const shaft = 0.13, headWidth = 0.32;
+  // A one-square move has barely any room once both ends are inset, so the head
+  // shrinks with the move rather than swallowing the whole arrow.
+  const headLength = Math.min(0.32, length * 0.42);
+  const sx = x1 + ux * 0.16, sy = y1 + uy * 0.16;
+  const tx = x2 - ux * 0.08, ty = y2 - uy * 0.08;
+  const nx = tx - ux * headLength, ny = ty - uy * headLength;
+
+  const at = (x, y, w) => `${(x + px * w).toFixed(3)},${(y + py * w).toFixed(3)}`;
+  const points = [
+    at(sx, sy, shaft / 2), at(nx, ny, shaft / 2), at(nx, ny, headWidth / 2),
+    `${tx.toFixed(3)},${ty.toFixed(3)}`,
+    at(nx, ny, -headWidth / 2), at(nx, ny, -shaft / 2), at(sx, sy, -shaft / 2),
+  ].join(" ");
+  svg.innerHTML = `<polygon points="${points}" fill="var(--arrow)"/>`;
+}
+
+function setEvalBar(cp, mate, matedBy) {
+  // The logistic squash is what keeps the bar useful: a raw centipawn scale
+  // pins to an edge the moment anyone is up a piece and stops moving after.
+  let pct = 50, text = "—";
+  // A delivered mate has no centipawn score and often no mate distance either,
+  // which otherwise leaves the bar sitting at a meaningless dead even.
+  if (matedBy) { pct = matedBy === "white" ? 100 : 0; text = "#"; }
+  else if (mate != null) { pct = mate > 0 ? 100 : 0; text = "M" + Math.abs(mate); }
+  else if (cp != null) { pct = 100 / (1 + Math.exp(-cp / 320)); text = (cp >= 0 ? "+" : "") + (cp / 100).toFixed(1); }
+  // The fill is always White's share of the bar; which end it grows from
+  // follows the board's orientation.
+  $("evalWrap").classList.toggle("flip", state.flipped);
+  $("evalBar").style.height = pct + "%";
+  $("evalNum").textContent = text;
+}
+
+function seatHtml(colour, game) {
+  const you = game.user_color === colour;
+  const name = you ? game.username : (game.opponent || "opponent");
+  const rating = you ? game.user_rating : game.opponent_rating;
+  return `<span class="dot" style="background:${colour === "white" ? "#e9e9ec" : "#191919"}"></span>
+    <span class="name">${esc(name || "?")}</span>
+    ${rating ? `<span class="rating">${esc(rating)}</span>` : ""}
+    ${you ? '<span class="you">you</span>' : ""}`;
+}
+
+function renderSeats() {
+  if (!state.game) {
+    $("seatTop").innerHTML = '<span class="muted">Board</span>';
+    $("seatBottom").innerHTML = '<span class="muted">No game open</span>';
+    return;
+  }
+  // Bottom seat is whichever colour is at the near edge of the board.
+  const bottom = state.flipped ? "black" : "white";
+  $("seatBottom").innerHTML = seatHtml(bottom, state.game);
+  $("seatTop").innerHTML = seatHtml(bottom === "white" ? "black" : "white", state.game) +
+    (state.game.url ? `<a class="ext" href="${esc(state.game.url)}" target="_blank"
+       rel="noopener" style="margin-left:auto" title="Open on ${esc(state.game.platform)}">↗</a>` : "");
 }
 
 /* ---- move list --------------------------------------------------------- */
-function renderMoves() {
-  const list = $("moveList");
-  list.innerHTML = "";
-  state.moves.forEach((m, i) => {
-    if (i % 2 === 0) {
-      const num = document.createElement("span");
-      num.className = "num";
-      num.textContent = m.move_number + ".";
-      list.appendChild(num);
-    }
-    const el = document.createElement("span");
-    el.className = "mv" + (m.is_player_move ? " own" : "") +
-      (i + 1 === state.ply ? " active" : "") +
-      (m.is_player_move && m.severity !== "ok" ? " sev-" + m.severity : "");
-    el.textContent = m.played_san + severityMark(m);
-    el.onclick = () => goTo(i + 1);
-    list.appendChild(el);
-  });
+function severityMark(m) { return m.is_player_move ? (MARKS[m.severity] || "") : ""; }
+
+function moveCell(m, index) {
+  if (!m) return '<span class="mv empty"></span>';
+  const classes = ["mv"];
+  if (m.is_player_move) classes.push("own");
+  if (index + 1 === state.ply) classes.push("active");
+  if (m.is_player_move && m.severity !== "ok" && m.severity !== "unknown") classes.push("sev-" + m.severity);
+  return `<span class="${classes.join(" ")}" data-ply="${index + 1}">${esc(m.played_san)}${severityMark(m)}</span>`;
 }
 
-function severityMark(m) {
-  if (!m.is_player_move) return "";
-  return { blunder: "??", mistake: "?", inaccuracy: "?!" }[m.severity] || "";
+function renderMoves() {
+  const rows = [];
+  for (let i = 0; i < state.moves.length; i += 2) {
+    rows.push(`<div class="mrow"><span class="mnum">${state.moves[i].move_number}</span>
+      ${moveCell(state.moves[i], i)}${moveCell(state.moves[i + 1], i + 1)}</div>`);
+  }
+  const list = $("moveList");
+  list.innerHTML = rows.join("");
+  list.querySelectorAll("[data-ply]").forEach(el => { el.onclick = () => goTo(+el.dataset.ply); });
+  // Scrolled by hand rather than with scrollIntoView, which walks up and scrolls
+  // every ancestor -- including the document, so stepping through a game or
+  // following a citation would yank the page out from under the reader.
+  const active = list.querySelector(".mv.active");
+  if (active) {
+    list.scrollTop = Math.max(
+      0, active.offsetTop - list.clientHeight / 2 + active.offsetHeight / 2);
+  }
 }
 
 function goTo(ply) {
   state.ply = Math.max(0, Math.min(ply, state.moves.length));
   const m = state.ply === 0 ? null : state.moves[state.ply - 1];
-  renderBoard(m ? m.fen_after : START_FEN, m ? m.played_uci : null);
-  setEvalBar(m ? m.eval_after_cp : 0, m ? m.mate_in : null);
+  const fen = m ? m.fen_after : START_FEN;
+  renderBoard(fen, m ? m.played_uci : null,
+    checkedKingSquare(fen, m?.tags?.includes("gives_check")));
+  // The engine's choice *for the position now on the board* is the next ply's
+  // best move -- that ply was searched from this exact position.
+  renderArrow(state.moves[state.ply]?.best_uci);
+  setEvalBar(m ? m.eval_after_cp : 0, m ? m.mate_in : null,
+    m?.played_san?.endsWith("#") ? m.side_to_move : null);
   $("plyLabel").textContent = state.ply === 0
     ? "start" : `${m.move_number}${m.side_to_move === "white" ? "." : "..."} ${m.played_san}`;
   renderMoves();
-  if (state.tab === "move") renderTab();
+  if (state.tab === "move") renderMoveTab();
 }
 
 /* ---- tabs -------------------------------------------------------------- */
-function esc(s) { const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; }
-
-function renderTab(html) {
-  if (html !== undefined) { $("tabBody").innerHTML = html; return; }
-  if (state.tab === "move") return renderMoveTab();
-  $("tabBody").innerHTML = '<span class="muted">Press the button above to generate.</span>';
-}
+function renderTab(html) { $("tabBody").innerHTML = html; $("tabBody").scrollTop = 0; }
 
 function renderMoveTab() {
   const body = $("tabBody");
@@ -260,12 +632,12 @@ function renderMoveTab() {
     return;
   }
   const m = state.moves[state.ply - 1];
-  const key = m.fen_before_key;
-  const cached = state.cache[key];
+  const cached = state.cache[m.fen_before_key];
+  const number = `${m.move_number}${m.side_to_move === "white" ? "." : "..."}`;
   const facts = `
-    <div class="card">
-      <h4>${esc(m.move_number)}${m.side_to_move === "white" ? "." : "..."} ${esc(m.played_san)}
-        <span class="sev-${esc(m.severity)}">${esc(severityMark(m) || "")}</span></h4>
+    <div class="card rule">
+      <h4>${esc(number)} ${esc(m.played_san)}
+        <span class="sev-${esc(m.severity)}">${esc(severityMark(m))}</span></h4>
       <p class="muted">${m.cp_lost != null ? esc(m.cp_lost) + " centipawns lost" : "not scored"}
         ${m.best_san ? " &middot; engine prefers <code>" + esc(m.best_san) + "</code>" : ""}</p>
       ${m.best_line_san?.length ? '<p class="label">Engine line</p><p><code>' + esc(m.best_line_san.join(" ")) + "</code></p>" : ""}
@@ -282,7 +654,7 @@ function renderMoveTab() {
       </div>`;
     return;
   }
-  body.innerHTML = facts + '<button id="explainBtn">Explain this move</button>';
+  body.innerHTML = facts + '<button id="explainBtn" class="primary">Explain this move</button>';
   $("explainBtn").onclick = async () => {
     const btn = $("explainBtn");
     btn.disabled = true; btn.textContent = "Thinking…";
@@ -292,7 +664,7 @@ function renderMoveTab() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ fen: m.fen_before_key, move: m.played_uci, rating: state.rating }),
       });
-      state.cache[key] = res.feedback;
+      state.cache[m.fen_before_key] = res.feedback;
       renderMoveTab();
     } catch (e) {
       btn.disabled = false; btn.textContent = "Explain this move";
@@ -301,9 +673,98 @@ function renderMoveTab() {
   };
 }
 
+/* ---- report building blocks -------------------------------------------- */
+function scorecard(s) {
+  const c = s.severity_counts || {};
+  const tile = (value, label, cls, sub) =>
+    `<div class="tile"><b class="${cls || ""}">${value}</b><span>${label}</span>
+     ${sub ? `<em>${sub}</em>` : ""}</div>`;
+  // Both accuracy figures: the conventional one stays comparable to Lichess and
+  // Chess.com, the second strips positions that were already decided, where
+  // giving up another 400cp says nothing about how well you played.
+  const competitive = s.average_centipawn_loss_competitive;
+  return `<div class="scorecard">
+    ${tile(s.average_centipawn_loss ?? "--", "avg cp loss", "",
+           competitive == null ? "" : `${competitive} in live positions`)}
+    ${tile(c.blunder ?? 0, "blunders", "sev-blunder")}
+    ${tile(c.mistake ?? 0, "mistakes", "sev-mistake")}
+    ${tile(c.inaccuracy ?? 0, "inaccuracies", "sev-inaccuracy")}
+    ${s.engine_best_move_rate == null ? "" : tile(Math.round(s.engine_best_move_rate * 100) + "%", "engine's move", "sev-ok")}
+  </div>`;
+}
+
+/* ---- blunder rates ------------------------------------------------------ */
+const CLOCK_ORDER = ["over 50% left", "20-50% left", "10-20% left", "under 10% left"];
+
+function ratesHtml(r) {
+  if (!r) return "";
+  const groups = [
+    ["by game phase", r.by_phase, null],
+    ["by clock remaining", r.by_clock_remaining, CLOCK_ORDER],
+    ["by position before the move", r.by_position_state, ["winning", "competitive", "losing"]],
+  ].filter(([, data]) => data && Object.keys(data).length);
+  if (!groups.length) return "";
+
+  // A single scale across every group, so the bars stay comparable to each other.
+  const all = groups.flatMap(([, d]) => Object.values(d).map(v => v.blunder_rate_pct || 0));
+  const max = Math.max(...all, r.blunder_rate_pct || 0) || 1;
+
+  const row = (label, v) => {
+    const pct = v.blunder_rate_pct ?? 0;
+    return `<div class="rate">
+      <span class="rlabel">${esc(label)}</span>
+      <span class="rtrack"><span class="rfill" style="width:${(100 * pct / max).toFixed(1)}%"></span>
+        <span class="rtick" style="left:${(100 * (r.blunder_rate_pct || 0) / max).toFixed(1)}%"
+              title="your overall rate, ${esc(r.blunder_rate_pct)}%"></span></span>
+      <span class="rval">${esc(pct)}%</span>
+      <span class="rn">${esc(v.moves)}</span>
+    </div>`;
+  };
+
+  const block = ([title, data, order]) => {
+    const keys = (order || Object.keys(data)).filter(k => data[k]);
+    return `<div class="rategroup"><p>${esc(title)}</p>${keys.map(k => row(k, data[k])).join("")}</div>`;
+  };
+
+  const enrich = r.move_type_enrichment && Object.entries(r.move_type_enrichment).length
+    ? `<table><thead><tr><th>Move type</th><th>Of blunders</th><th>Of all moves</th><th>Verdict</th></tr></thead><tbody>` +
+      Object.entries(r.move_type_enrichment)
+        .sort((a, b) => (b[1].enrichment || 0) - (a[1].enrichment || 0))
+        .map(([tag, v]) => {
+          // The verdict, and the band it comes from, are the server's call.
+          const tone = { "over-represented": "over", "not a weakness": "under" }[v.verdict] || "";
+          return `<tr><td>${esc(tag.replace(/_/g, " "))}</td>
+            <td>${esc(v.share_of_blunders_pct)}%</td><td>${esc(v.share_of_all_moves_pct)}%</td>
+            <td class="verdict ${tone}">${esc(v.enrichment)}&times; ${esc(v.verdict)}</td></tr>`;
+        }).join("") + "</tbody></table>"
+    : "";
+
+  return `<p class="label">Where the mistakes happen</p>
+    ${groups.map(block).join("")}
+    <p class="scale">Bars share one scale; the tick is your overall
+      ${esc(r.blunder_rate_pct)}% blunder rate across ${esc(r.scored_moves)} scored moves.
+      The right-hand number is how many moves are in each bucket.</p>
+    ${details("What kind of move goes wrong", enrich)}`;
+}
+
+function details(summary, inner) {
+  return inner
+    ? `<details><summary>${esc(summary)}</summary><div class="tablewrap">${inner}</div></details>`
+    : "";
+}
+
+function themes(list) {
+  return (list || []).map(t => `
+    <div class="card">
+      <h4>${esc(t.title)}</h4>
+      <p>${rich(t.detail)}</p>
+      ${t.evidence?.length ? "<ul>" + t.evidence.map(e => `<li>${rich(e)}</li>`).join("") + "</ul>" : ""}
+    </div>`).join("");
+}
+
 function timeControlHtml(advice, data) {
-  if (!advice || !advice.length) return "";
-  return '<p class="label">By time control</p>' + advice.map(a => {
+  if (!advice?.length) return "";
+  return advice.map(a => {
     const d = (data || {})[a.time_control] || {};
     const acc = d.accuracy || {};
     const sc = acc.severity_counts || {};
@@ -313,31 +774,26 @@ function timeControlHtml(advice, data) {
        ${d.clock ? " &middot; " + esc(d.clock.average_seconds_per_move) + "s per move" : ""}</p>`;
     return `<div class="card">
       <h4>${esc(a.time_control)} <span class="muted">— ${esc(a.verdict)}</span></h4>
-      ${stats}<p>${esc(a.advice)}</p></div>`;
+      ${stats}<p>${rich(a.advice)}</p></div>`;
   }).join("");
 }
 
-function openingsHtml(o, exits) {
+function openingsTable(o) {
   if (!o) return "";
   const rows = side => (o[side] || []).map(r =>
     `<tr><td>${esc(r.opening)}</td><td class="muted">${esc(r.eco || "")}</td>
      <td>${esc(r.games)}</td><td>${esc(r.score_pct)}%</td></tr>`).join("");
   const table = side => (o[side] || []).length
-    ? `<table><thead><tr><th>${side === "as_white" ? "As White" : "As Black"}</th><th>ECO</th><th>Games</th><th>Score</th></tr></thead><tbody>${rows(side)}</tbody></table>`
-    : "";
-  let note = "";
-  if (!(o.as_white || []).length && !(o.as_black || []).length) {
-    note = `<p class="muted">${esc(o.distinct_openings)} distinct openings across
-      ${esc(o.games_total)} games — none repeated often enough to call a repertoire.
-      Analyze more games to see patterns here.</p>`;
-  }
-  const exitNote = exits && exits.unavailable
-    ? '<p class="muted">Opening explorer unavailable — no theory comparison.</p>' : "";
-  return table("as_white") + table("as_black") + note + exitNote;
+    ? `<table><thead><tr><th>${side === "as_white" ? "As White" : "As Black"}</th><th>ECO</th>
+       <th>Games</th><th>Score</th></tr></thead><tbody>${rows(side)}</tbody></table>` : "";
+  const both = table("as_white") + table("as_black");
+  if (both) return both;
+  return `<p class="muted">${esc(o.distinct_openings)} distinct openings across ${esc(o.games_total)}
+    games — none repeated often enough to call a repertoire.</p>`;
 }
 
-function clockHtml(c) {
-  if (!c) return '<p class="muted">No clock data for these games.</p>';
+function clockTable(c) {
+  if (!c) return "";
   const sev = c.average_seconds_by_severity || {};
   const row = (label, v) => v == null ? "" : `<tr><td>${esc(label)}</td><td>${esc(v)}s</td></tr>`;
   let html = `<table><tbody>
@@ -361,46 +817,41 @@ function clockHtml(c) {
 function conversionHtml(conv, missed) {
   let html = "";
   if (conv) {
-    html += `<p class="label">Conversion</p><p>Reached a winning position in
-      ${esc(conv.winning_positions_reached)} games and won
+    html += `<p>Reached a winning position in ${esc(conv.winning_positions_reached)} games and won
       ${esc(conv.converted_to_wins)} of them (${esc(conv.conversion_rate_pct)}%).</p>`;
   }
-  if (missed && missed.count) {
-    html += `<p class="label">Missed punishment</p><p>${esc(missed.count)} times your
-      opponent handed you a winning position and it slipped within a move.</p>` +
+  if (missed?.count) {
+    html += `<p>${esc(missed.count)} times your opponent handed you a winning position and it
+      slipped within a move.</p>` +
       (missed.examples || []).slice(0, 3).map(m =>
-        `<div class="card"><p>After their <code>${esc(m.opponent_move)}</code> you were
+        `<div class="card">After their <code>${esc(m.opponent_move)}</code> you were
          +${esc(Math.round(m.advantage_offered_cp / 100))}; you played
-         <code>${esc(m.your_reply)}</code>${m.engine_wanted ? ", engine wanted <code>" + esc(m.engine_wanted) + "</code>" : ""}.</p></div>`).join("");
+         <code>${esc(m.your_reply)}</code>${m.engine_wanted ? ", engine wanted <code>" + esc(m.engine_wanted) + "</code>" : ""}.</div>`).join("");
   }
   return html;
 }
 
-function statsHtml(s) {
-  return `<div>
-    <div class="stat"><b>${s.average_centipawn_loss ?? "--"}</b><span>avg cp loss</span></div>
-    <div class="stat"><b class="sev-blunder">${s.severity_counts.blunder}</b><span>blunders</span></div>
-    <div class="stat"><b class="sev-mistake">${s.severity_counts.mistake}</b><span>mistakes</span></div>
-    <div class="stat"><b class="sev-inaccuracy">${s.severity_counts.inaccuracy}</b><span>inaccuracies</span></div>
-  </div>`;
-}
-
+/* ---- tab loaders ------------------------------------------------------- */
 async function loadGameReview() {
   if (!state.gameId) return renderTab('<span class="muted">Pick a game first.</span>');
   renderTab('<span class="muted">Reviewing…</span>');
   try {
     const d = await api(`/feedback/game/${state.gameId}`);
+    setCites(d.citations);
     const f = d.feedback;
-    renderTab(statsHtml(d.statistics) + `
-      <p>${esc(f.summary)}</p>
+    renderTab(scorecard(d.statistics) + `
+      <p class="label">Summary</p><p>${rich(f.summary)}</p>
       <p class="label">Critical moments</p>
       ${f.critical_moments.map(c => `
         <div class="card">
-          <h4><a href="#" onclick="goTo(${c.ply});return false;">${esc(c.move_san)}</a></h4>
-          <p>${esc(c.what_happened)}</p>
-          <p class="label">Better</p><p>${esc(c.better)}</p>
+          <h4><a class="cite" href="#" data-ply="${c.ply}">${esc(c.move_san)}</a></h4>
+          <p>${rich(c.what_happened)}</p>
+          <p class="label">Better</p><p>${rich(c.better)}</p>
         </div>`).join("")}
-      <p class="label">Takeaway</p><p>${esc(f.takeaway)}</p>`);
+      <p class="label">Takeaway</p><p>${rich(f.takeaway)}</p>`);
+    $("tabBody").querySelectorAll("[data-ply]").forEach(el => {
+      el.onclick = e => { e.preventDefault(); goTo(+el.dataset.ply); };
+    });
   } catch (e) { renderTab(`<p class="err">${esc(e.message)}</p>`); }
 }
 
@@ -409,12 +860,17 @@ async function loadOpenings() {
   try {
     const list = await api(`/feedback/openings/${state.jobId}`);
     if (!list.length) return renderTab('<span class="muted">No openings identified yet.</span>');
-    renderTab('<p class="label">Pick an opening to coach</p>' + list.map((o, i) =>
-      `<div class="card"><h4>${esc(o.opening)} <span class="muted">as ${esc(o.colour)}</span></h4>
-       <p class="muted">${esc(o.games)} game${o.games > 1 ? "s" : ""} &middot; scored
-       ${esc(o.score_pct)}% &middot; ${esc(o.eco || "")}</p>
-       <button data-open="${i}">Coach this opening</button></div>`).join(""));
-    document.querySelectorAll("[data-open]").forEach(btn => {
+    renderTab('<p class="label">Pick an opening to coach</p>' + list.map((o, i) => {
+      const where = o.game_numbers?.length
+        ? o.game_numbers.map(n => `<a class="cite" href="#" data-game="${n}">Game ${n}</a>`).join(" ") : "";
+      return `<div class="card"><h4>${esc(o.opening)} <span class="muted">as ${esc(o.colour)}</span></h4>
+        <p class="muted">${esc(o.games)} game${o.games > 1 ? "s" : ""} &middot; scored
+        ${esc(o.score_pct)}%${o.eco ? " &middot; " + esc(o.eco) : ""}</p>
+        ${where ? `<p>${where}</p>` : ""}
+        <button data-open="${i}">Coach this opening</button></div>`;
+    }).join(""));
+    wireGameNumberLinks();
+    $("tabBody").querySelectorAll("[data-open]").forEach(btn => {
       btn.onclick = () => coachOpening(list[+btn.dataset.open], btn);
     });
   } catch (e) { renderTab(`<p class="err">${esc(e.message)}</p>`); }
@@ -425,25 +881,44 @@ async function coachOpening(o, btn) {
   try {
     const q = `name=${encodeURIComponent(o.opening)}&colour=${encodeURIComponent(o.colour)}`;
     const d = await api(`/feedback/opening/${state.jobId}?${q}`);
+    setCites(d.citations);
     const f = d.feedback;
-    renderTab(`<h3>${esc(f.opening)} <span class="muted">as ${esc(o.colour)}</span></h3>
+    const refs = Object.fromEntries((d.games || []).map(g => [g.ref, g]));
+    renderTab(`<h3 class="headline">${esc(f.opening)} <span class="muted">as ${esc(o.colour)}</span></h3>
       <p class="muted">${esc(f.theory_confidence)}</p>
-      <p class="label">The idea</p><p>${esc(f.the_idea)}</p>
-      <p class="label">Middlegame it aims for</p><p>${esc(f.typical_middlegame)}</p>
-      <p class="label">Pawn structure</p><p>${esc(f.pawn_structure)}</p>
-      <p class="label">Your version</p><p>${esc(f.your_version)}</p>
+      <p class="label">The idea</p><p>${rich(f.the_idea)}</p>
+      <p class="label">Middlegame it aims for</p><p>${rich(f.typical_middlegame)}</p>
+      <p class="label">Pawn structure</p><p>${rich(f.pawn_structure)}</p>
+      <p class="label">Your version</p><p>${rich(f.your_version)}</p>
       ${f.divergences.length ? '<p class="label">Where you parted from the plan</p>' : ""}
-      ${f.divergences.map(v => `<div class="card">
-        <h4>${esc(v.move)} — ${esc(v.what_you_played)}</h4>
-        <p class="label">The plan wants</p><p>${esc(v.what_the_plan_wants)}</p>
-        <p class="label">Engine</p><p>${esc(v.engine_note)}</p></div>`).join("")}
-      <p class="label">Focus</p><p>${esc(f.focus)}</p>
-      <p><button id="backToOpenings">&lsaquo; All openings</button></p>`);
+      ${f.divergences.map(v => {
+        const g = refs[v.game_ref];
+        return `<div class="card">
+          <h4>${esc(v.move)} — ${esc(v.what_you_played)}
+            ${g ? `<a class="cite" href="#" data-game="${g.number}">${esc(g.label)}</a>` : ""}</h4>
+          <p class="label">The plan wants</p><p>${rich(v.what_the_plan_wants)}</p>
+          <p class="label">Engine</p><p>${rich(v.engine_note)}</p></div>`;
+      }).join("")}
+      <p class="label">Focus</p><p>${rich(f.focus)}</p>
+      <p style="margin-top:14px"><button id="backToOpenings">&lsaquo; All openings</button></p>`);
+    wireGameNumberLinks();
     $("backToOpenings").onclick = loadOpenings;
   } catch (e) {
     btn.disabled = false; btn.textContent = "Coach this opening";
     btn.insertAdjacentHTML("afterend", `<p class="err">${esc(e.message)}</p>`);
   }
+}
+
+// Links written as a game number rather than a resolved citation -- the openings
+// tab lists games it has no ply for.
+function wireGameNumberLinks() {
+  $("tabBody").querySelectorAll("[data-game]").forEach(el => {
+    el.onclick = e => {
+      e.preventDefault();
+      const game = state.games.find(g => g.number === +el.dataset.game);
+      if (game) openGame(game.game_id, 0);
+    };
+  });
 }
 
 async function loadReport() {
@@ -452,21 +927,23 @@ async function loadReport() {
   try {
     const speed = $("speedFilter").value;
     const d = await api(`/feedback/report/${state.jobId}${speed ? "?speed=" + encodeURIComponent(speed) : ""}`);
+    setCites(d.citations);
     const f = d.feedback;
-    const themes = list => list.map(t => `
-      <div class="card">
-        <h4>${esc(t.title)}</h4>
-        <p>${esc(t.detail)}</p>
-        ${t.evidence?.length ? '<p class="label">Evidence</p><ul>' + t.evidence.map(e => `<li>${esc(e)}</li>`).join("") + "</ul>" : ""}
-      </div>`).join("");
-    renderTab(`<h3>${esc(f.headline)}</h3>` + statsHtml(d.statistics) + `
+    const exitNote = d.book_exits?.unavailable
+      ? '<p class="muted">Opening explorer unavailable — no theory comparison.</p>' : "";
+    renderTab(`
+      <h3 class="headline">${rich(f.headline)}</h3>
+      ${scorecard(d.statistics)}
+      ${ratesHtml(d.rates)}
       <p class="label">Working well</p>${themes(f.strengths)}
       <p class="label">Costing you points</p>${themes(f.weaknesses)}
-      <p class="label">Openings</p><p>${esc(f.openings)}</p>${openingsHtml(d.openings, d.book_exits)}
-      <p class="label">Clock</p><p>${esc(f.clock)}</p>${clockHtml(d.clock)}
-      ${timeControlHtml(f.by_time_control, d.by_time_control)}
-      ${conversionHtml(d.conversion, d.missed_punishment)}
-      <p class="label">Drills</p><ul>${f.drills.map(x => `<li>${esc(x)}</li>`).join("")}</ul>`);
+      <p class="label">Openings</p><p>${rich(f.openings)}</p>${exitNote}
+      ${details("Repertoire breakdown", openingsTable(d.openings))}
+      <p class="label">Clock</p><p>${rich(f.clock)}</p>
+      ${details("Clock breakdown", clockTable(d.clock))}
+      <p class="label">By time control</p>${timeControlHtml(f.by_time_control, d.by_time_control)}
+      ${details("Conversion & missed punishment", conversionHtml(d.conversion, d.missed_punishment))}
+      <p class="label">Drills</p><ul>${f.drills.map(x => `<li>${rich(x)}</li>`).join("")}</ul>`);
   } catch (e) {
     renderTab(`<p class="err">${esc(e.message)}</p>
       <p class="muted">Nothing was saved, so retrying is safe once the cause is fixed.</p>`);
@@ -474,11 +951,40 @@ async function loadReport() {
 }
 
 /* ---- games ------------------------------------------------------------- */
+function renderGames() {
+  const list = $("gameList");
+  if (!state.games.length) { list.innerHTML = '<div style="padding:14px" class="muted">No games found.</div>'; return; }
+  const done = state.games.filter(g => g.analyzed).length;
+  $("gameCount").textContent = `${done}/${state.games.length}`;
+
+  list.innerHTML = state.games.map(g => {
+    const chip = g.user_score === 1 ? ["w", "W"] : g.user_score === 0 ? ["l", "L"] : ["d", "D"];
+    return `<div class="game${g.analyzed ? "" : " pending"}${state.gameId === g.game_id ? " active" : ""}"
+                 data-id="${esc(g.game_id)}">
+      <span class="gnum">${g.number}</span>
+      <div class="gtop">
+        <span class="chip ${chip[0]}">${chip[1]}</span>
+        <span class="who">${esc(g.opponent || "?")}${g.opponent_rating ? " " + esc(g.opponent_rating) : ""}</span>
+      </div>
+      <div class="gmeta">
+        ${g.analyzed ? "" : "<span>analyzing…</span>"}
+        ${g.speed ? `<span>${esc(g.speed)}</span>` : ""}
+        ${g.opening_family ? `<span class="opening">${esc(g.opening_family)}</span>` : ""}
+        ${g.played_at ? `<span class="when">${esc(g.played_at.slice(0, 10))}</span>` : ""}
+      </div>
+    </div>`;
+  }).join("");
+
+  list.querySelectorAll(".game:not(.pending)").forEach(el => {
+    el.onclick = () => openGame(el.dataset.id, 0);
+  });
+}
+
 async function loadGames() {
   const games = await api(`/feedback/games/${state.jobId}`);
-  const list = $("gameList");
-  if (!games.length) { list.innerHTML = '<div class="body muted">No games found.</div>'; return; }
-  state.rating = games[0].user_rating;
+  state.games = games;
+  if (games.length) state.rating = games[0].user_rating;
+
   const speeds = [...new Set(games.map(g => g.speed).filter(Boolean))].sort();
   const filter = $("speedFilter");
   if (filter.dataset.speeds !== speeds.join()) {
@@ -488,34 +994,32 @@ async function loadGames() {
       speeds.map(sp => `<option value="${esc(sp)}">${esc(sp)} only</option>`).join("");
     filter.value = keep;
   }
-  list.innerHTML = "";
-  games.forEach(g => {
-    const el = document.createElement("div");
-    el.className = "game" + (g.analyzed ? "" : " pending");
-    if (state.gameId === g.game_id) el.classList.add("active");
-    const outcome = g.user_score === 1 ? "won" : g.user_score === 0 ? "lost" : "drew";
-    el.innerHTML = `<div>${esc(outcome)} as ${esc(g.user_color)}${g.analyzed ? "" : ' <span class="vs">analyzing…</span>'}</div>
-      <div class="vs">vs ${esc(g.opponent || "?")} ${g.opponent_rating ? "(" + esc(g.opponent_rating) + ")" : ""} &middot; ${esc(g.speed || "")}</div>`;
-    if (g.analyzed) {
-      el.onclick = () => { document.querySelectorAll(".game").forEach(x => x.classList.remove("active"));
-                           el.classList.add("active"); openGame(g.game_id); };
-    }
-    list.appendChild(el);
-  });
+  renderGames();
 }
 
-async function openGame(gameId) {
-  state.gameId = gameId;
-  try {
-    const d = await api(`/feedback/game/${gameId}/moves`);
-    // The move endpoint needs the position before the move; derive it from the
-    // previous ply's resulting position (or the start position for ply 1).
-    state.moves = d.moves.map((m, i) => ({
-      ...m, fen_before_key: i === 0 ? START_FEN : d.moves[i - 1].fen_after,
-    }));
-    goTo(0);
-    if (state.tab === "game") loadGameReview();
-  } catch (e) { renderTab(`<p class="err">${esc(e.message)}</p>`); }
+async function openGame(gameId, ply) {
+  const changed = state.gameId !== gameId;
+  if (changed) {
+    try {
+      const d = await api(`/feedback/game/${gameId}/moves`);
+      state.gameId = gameId;
+      state.game = d.game;
+      // The move endpoint needs the position before the move; derive it from the
+      // previous ply's resulting position (or the start position for ply 1).
+      state.moves = d.moves.map((m, i) => ({
+        ...m, fen_before_key: i === 0 ? START_FEN : d.moves[i - 1].fen_after,
+      }));
+      // Show the board from the side the player actually had -- reading your own
+      // game upside down is the small friction that makes a review feel wrong.
+      state.flipped = d.game.user_color === "black";
+      renderGames();
+      renderSeats();
+    } catch (e) { return renderTab(`<p class="err">${esc(e.message)}</p>`); }
+  }
+  goTo(ply || 0);
+  // Job-level tabs (report, openings) stay valid across a game switch; the game
+  // review does not, so it reloads for whichever game is now open.
+  if (changed && state.tab === "game") loadGameReview();
 }
 
 /* ---- job --------------------------------------------------------------- */
@@ -542,7 +1046,10 @@ async function runAnalysis() {
 
 async function pollJob() {
   const job = await api(`/jobs/${state.jobId}`);
-  $("status").textContent = `${job.status} — ${job.games_done}/${job.games_total || "?"} games`;
+  $("status").textContent = job.status === "done"
+    ? `${job.games_done} games analyzed` : `${job.status} — ${job.games_done}/${job.games_total || "?"}`;
+  $("progressBar").style.width =
+    job.games_total ? (100 * job.games_done / job.games_total) + "%" : "0";
   // games rows are written before their plies are walked, so poll them every tick
   // rather than waiting for a whole game to complete.
   await loadGames();
@@ -554,6 +1061,7 @@ async function pollJob() {
     setTimeout(pollJob, 2000);
   } else {
     $("analyze").disabled = false;
+    if (job.status === "done") setTimeout(() => { $("progressBar").style.width = "0"; }, 800);
     if (job.status === "error") $("status").innerHTML = `<span class="err">${esc(job.error)}</span>`;
   }
 }
@@ -566,10 +1074,18 @@ $("first").onclick = () => goTo(0);
 $("prev").onclick = () => goTo(state.ply - 1);
 $("next").onclick = () => goTo(state.ply + 1);
 $("last").onclick = () => goTo(state.moves.length);
+$("flip").onclick = () => { state.flipped = !state.flipped; renderSeats(); goTo(state.ply); };
+$("arrowToggle").onclick = () => {
+  state.showArrow = !state.showArrow;
+  $("arrowToggle").classList.toggle("off", !state.showArrow);
+  goTo(state.ply);
+};
 document.onkeydown = e => {
   if (document.activeElement.tagName === "INPUT") return;
   if (e.key === "ArrowLeft") goTo(state.ply - 1);
   if (e.key === "ArrowRight") goTo(state.ply + 1);
+  if (e.key === "Home") goTo(0);
+  if (e.key === "End") goTo(state.moves.length);
 };
 
 function selectTab(tab) {
@@ -583,11 +1099,16 @@ document.querySelectorAll(".tabs button").forEach(btn => {
     if (btn.dataset.tab === "game") loadGameReview();
     else if (btn.dataset.tab === "openings") loadOpenings();
     else if (btn.dataset.tab === "report") loadReport();
-    else renderTab();
+    else renderMoveTab();
   };
 });
 
-renderBoard(START_FEN, null);
+renderSeats();
+setEvalBar(0, null);
+// Draw immediately with whatever is available, then again once the sprite lands,
+// so a slow read of the sprite never leaves an empty board on screen.
+renderBoard(START_FEN, null, null);
+loadPieces().then(() => renderBoard(START_FEN, null, null));
 </script>
 </body>
 </html>

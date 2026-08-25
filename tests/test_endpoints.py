@@ -5,6 +5,8 @@ are: the guards that stop a billable model call running against data that cannot
 support an answer, and the distinction between "no result" and "service broken".
 """
 
+import json
+
 from tests.conftest import AFTER_E5, DEPTH, START_FEN
 
 
@@ -188,6 +190,7 @@ def test_report_sends_every_analysis_section_to_the_model(client, seed, with_api
     payload = stub_llm[0]["payload"]
     for section in (
         "overall",
+        "rates",
         "by_time_control",
         "openings",
         "clock",
@@ -242,6 +245,79 @@ def test_opening_coach_sends_both_sides_moves(client, seed, with_api_key, stub_l
     # The opening is a dialogue; the player's moves make no sense alone.
     assert {m["yours"] for m in moves} == {True, False}
     assert stub_llm[0]["effort"] == "high"
+
+
+def test_no_endpoint_shows_the_model_a_raw_game_id(client, seed, with_api_key, stub_llm):
+    """Game ids are unreadable in prose and unlinkable, so the model gets G-numbers.
+
+    Asserted over the whole serialized payload rather than the known sites: ids
+    surface from a dozen aggregates, and one leak is enough for the model to quote
+    it back at the player.
+    """
+    job_id = seed()
+    client.get(f"/feedback/report/{job_id}")
+    client.get(f"/feedback/game/{job_id}-g0")
+    client.get(f"/feedback/opening/{job_id}?name=King%27s%20Pawn%20Game&colour=white")
+
+    assert len(stub_llm) == 3
+    for call in stub_llm:
+        assert f"{job_id}-g" not in json.dumps(call["payload"]), call["kind"]
+
+
+def test_the_report_tells_the_model_which_games_are_which(client, seed, with_api_key, stub_llm):
+    job_id = seed(speeds=("rapid", "bullet"))
+    client.get(f"/feedback/report/{job_id}")
+
+    index = stub_llm[0]["payload"]["games_index"]
+    assert [entry["ref"] for entry in index] == ["G1", "G2"]
+    # The description is what makes a bare number mean something to the model.
+    assert "rival" in index[0]["game"]
+
+
+def test_game_numbers_survive_the_speed_filter(client, seed, with_api_key, stub_llm):
+    """A filtered report keeps the sidebar's numbers rather than renumbering 1..n.
+
+    Games are listed newest first, so the seeded rapid game (played first) is
+    Game 2. Narrowing the report to rapid must still call it Game 2 -- renumbering
+    it to Game 1 would point every citation at the wrong sidebar row.
+    """
+    job_id = seed(speeds=("rapid", "bullet"))
+    client.get(f"/feedback/report/{job_id}?speed=rapid")
+
+    payload = stub_llm[0]["payload"]
+    assert [entry["ref"] for entry in payload["games_index"]] == ["G2"]
+    assert payload["per_game"][0]["game_ref"] == "G2"
+
+
+def test_the_report_resolves_the_citations_the_model_wrote(client, seed, with_api_key, monkeypatch):
+    """A [G1#3] in the model's prose comes back as a marker plus a resolved link."""
+
+    async def cited_report(kind, subject, payload, schema, effort=None, refresh=False):
+        return {
+            "headline": "you drop material after a long think [G1#3]",
+            "strengths": [],
+            "weaknesses": [],
+            "openings": "nothing to say",
+            "clock": "nothing to say",
+            "by_time_control": [],
+            "drills": ["look again at [G1#3]"],
+        }
+
+    from app.services import llm
+
+    monkeypatch.setattr(llm, "generate", cited_report)
+    job_id = seed()
+    body = client.get(f"/feedback/report/{job_id}").json()
+
+    assert body["feedback"]["headline"] == "you drop material after a long think [[c0]]"
+    assert body["feedback"]["drills"] == ["look again at [[c0]]"]
+
+    citation = body["citations"][0]
+    assert citation["id"] == "c0"
+    # Newest game first, so Game 1 is the second one seeded.
+    assert citation["game_id"] == f"{job_id}-g1"
+    assert citation["ply"] == 3
+    assert citation["text"] == "Game 1 · 2.Nf3"
 
 
 def test_opening_coach_unknown_opening_is_404(client, seed, with_api_key, stub_llm):

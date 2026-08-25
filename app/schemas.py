@@ -63,7 +63,8 @@ class TimeControlAdvice(BaseModel):
 
 
 class OpeningDivergence(BaseModel):
-    game_id: str
+    # The G-number of the game this happened in, e.g. "G3" -- never a database id.
+    game_ref: str
     move: str
     what_you_played: str
     what_the_plan_wants: str

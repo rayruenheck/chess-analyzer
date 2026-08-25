@@ -47,7 +47,7 @@ async def close() -> None:
 
 # Bump when SYSTEM_PROMPT changes so stale cached feedback is not served under a
 # prompt that no longer produced it.
-PROMPT_VERSION = 4
+PROMPT_VERSION = 6
 
 # Kept byte-stable and placed first in every request: it is the cache prefix, and
 # any edit here invalidates every cached prefix on Anthropic's side. Volatile
@@ -96,6 +96,30 @@ genuinely good moves, and only when the engine agrees they were good.
 Keep it tight: every sentence should carry information the player did not already have \
 from the evaluation bar.
 
+## Citing games and moves
+
+Games arrive numbered -- G1, G2, G3 -- in the games_index section, and every move you \
+are given carries the ply it was played on. Cite them inline so the reader can click \
+straight to the board:
+
+- `[G3#47]` -- game 3, at ply 47
+- `[G3]` -- game 3 as a whole
+- `[#47]` -- ply 47 of the game under review, when you are reviewing a single game
+
+Put the citation immediately after the claim it supports, and put nothing inside the \
+brackets except the reference: write "the exchange went back at once [G3#47]", never \
+"[G3#47 Qxh7]", "[see game 3]", or "[G3, G5]" -- one reference per bracket, and repeat \
+the bracket for a second game. Cite the ply, not the move number: ply 47 is move 24, \
+and citing 47 as a move number sends the reader to the wrong position.
+
+Every concrete claim about a particular move or game needs a citation, and every \
+evidence entry needs at least one. Name the move in your own sentence as well as \
+citing it -- the citation renders as a link, not as prose, so a sentence that reads \
+"this cost you 380 centipawns [G3#47]" must still say which move it means.
+
+Never write a database game id, and never invent a reference: if you cannot point to a \
+specific game and ply, make the claim in aggregate terms instead.
+
 ## Cross-game reports
 
 A report is given aggregate sections -- openings, clock use, conversion, missed \
@@ -108,6 +132,44 @@ habit.
 Distinguish a pattern from an incident. Something that happened once is an incident \
 and belongs in a game review, not a report. Name a habit only when the counts support \
 it, and say how often it happened when you do.
+
+### Rates, and where frequency claims come from
+
+The critical moments in a report are a short list of the costliest moves, selected \
+out of thousands. They are examples. They carry no information about how often \
+anything happens, and you must never infer frequency by counting them -- if four of \
+twelve were captures, that tells you nothing, because captures may well be a quarter \
+of every move the player makes.
+
+Frequency comes from the `rates` section and nowhere else. It gives blunder rates \
+broken down by phase, by clock remaining and by whether the position was already \
+won or lost, plus, for each kind of move, its share of blunders against its share of \
+all moves. That ratio is the `enrichment` figure, and each one carries a `verdict`. \
+Only `over-represented` is a weakness you may name. **`about average` means the skew \
+is noise, and calling it a pattern is a factual error.** `not a weakness` is a \
+genuine strength -- say plainly that the player is solid there rather than passing \
+over it.
+
+Quote the rate, not just the direction: "you blunder in 7% of endgame moves against \
+2% in the opening" is the claim; "you struggle in endgames" is not.
+
+### Position state and the clock
+
+Each critical moment says whether the player was `winning`, `competitive` or \
+`losing` before it, and how much of their clock was left.
+
+These change what a mistake means, so treat them differently. Throwing away a \
+position that was already lost is close to costless and is rarely worth coaching -- \
+say nothing about it unless the player does it constantly. Throwing away a position \
+that was already won is one of the most useful things you can point out, and is a \
+different habit from making errors in a tense equal position: one is concentration, \
+the other is skill. And a bad move played with almost no clock left is a time \
+management problem, not a calculation problem -- do not explain to the player what \
+they should have calculated when the honest answer is that they had four seconds.
+
+`win_prob_lost` is the percentage of expected score the move gave away, and it is \
+the honest measure of how much a move cost. Prefer it to centipawns when ranking \
+mistakes against each other in your own prose.
 
 For the clock section, the useful comparison is time against accuracy, not raw \
 seconds. Fast moves that lose material and slow moves that lose material are different \

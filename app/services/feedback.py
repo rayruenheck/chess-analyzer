@@ -20,6 +20,7 @@ from app.db import get_db
 from app.schemas import GameFeedback, MoveFeedback, OpeningCoach, PlayerReport
 from app.services import classify, evaluation, explorer, insights, llm
 from app.services import jobs as jobs_service
+from app.services.citations import GameIndex
 from app.services.fen import normalize_fen
 
 logger = logging.getLogger(__name__)
@@ -27,7 +28,11 @@ logger = logging.getLogger(__name__)
 # How many of the player's worst moves get sent for explanation. Past roughly this
 # many, a review stops being actionable and starts being a wall of text.
 CRITICAL_MOMENTS_PER_GAME = 8
-CRITICAL_MOMENTS_PER_REPORT = 25
+# Deliberately fewer than it looks like it could afford. Examples are the wrong
+# tool for the report's actual job -- naming recurring habits -- because a list of
+# moves carries no denominator, and insights.pattern_rates answers that question
+# properly. A dozen well-chosen moments plus real rates beats a long tail of ties.
+CRITICAL_MOMENTS_PER_REPORT = 12
 
 PLY_FIELDS = [
     "ply",
@@ -42,6 +47,8 @@ PLY_FIELDS = [
     "eval_diff_cp",
     "best_move",
     "principal_variation",
+    "score_cp_before",
+    "mate_in_before",
     "score_cp_after",
     "mate_in_after",
 ]
@@ -51,6 +58,7 @@ SELECT p.ply, p.game_id, p.fen_before, p.fen_after, p.move_uci, p.move_san, p.mo
        p.clock_after_seconds, p.seconds_spent,
        me.eval_diff_cp,
        before_eval.best_move, before_eval.principal_variation,
+       before_eval.score_cp, before_eval.mate_in,
        after_eval.score_cp, after_eval.mate_in
 FROM game_plies p
 LEFT JOIN move_evaluations me
@@ -115,13 +123,27 @@ async def get_game(game_id: str) -> dict | None:
 
 
 async def list_games(job_id: str) -> list[dict]:
+    """Every game in a job, newest first, numbered.
+
+    The `number` is the one the player sees everywhere -- the sidebar row, the
+    "Game 3" in the coaching prose, the citation link. It is assigned here, over
+    the whole job and before any filtering, so a report narrowed to one time
+    control still refers to games by the same numbers as the sidebar.
+    """
     db = get_db()
     async with db.execute(
         f"SELECT {', '.join(GAME_FIELDS)} FROM games WHERE job_id = ? ORDER BY played_at DESC",
         (job_id,),
     ) as cursor:
         rows = await cursor.fetchall()
-    return [dict(zip(GAME_FIELDS, row)) for row in rows]
+
+    games = []
+    for number, row in enumerate(rows, start=1):
+        game = dict(zip(GAME_FIELDS, row))
+        game["number"] = number
+        game["opening_family"] = insights.opening_family(game.get("opening_name"))
+        games.append(game)
+    return games
 
 
 async def _load_plies(game_id: str, depth: int) -> list[dict]:
@@ -131,7 +153,7 @@ async def _load_plies(game_id: str, depth: int) -> list[dict]:
     return [dict(zip(PLY_FIELDS, row)) for row in rows]
 
 
-def _annotate(ply: dict) -> dict:
+def _annotate(ply: dict, game: dict | None = None) -> dict:
     """Turns one joined DB row into the fact bundle the model sees."""
     pv = ply["principal_variation"]
     facts = classify.describe_move(
@@ -139,6 +161,8 @@ def _annotate(ply: dict) -> dict:
         move_uci=ply["move_uci"],
         eval_diff_cp=ply["eval_diff_cp"],
         best_move_uci=ply["best_move"],
+        score_cp_before=ply["score_cp_before"],
+        mate_in_before=ply["mate_in_before"],
         score_cp_after=ply["score_cp_after"],
         mate_in_after=ply["mate_in_after"],
         best_pv_uci=json.loads(pv) if pv else [],
@@ -152,6 +176,15 @@ def _annotate(ply: dict) -> dict:
     facts["fen_before"] = ply["fen_before"]
     facts["clock_after_seconds"] = ply["clock_after_seconds"]
     facts["seconds_spent"] = ply["seconds_spent"]
+
+    # Seconds are not comparable across time controls -- 20 seconds left is calm in
+    # a bullet game and desperate in a 30-minute one. The fraction of the starting
+    # bank is, so that is what the model gets to reason about time pressure with.
+    bank = (game or {}).get("initial_seconds")
+    left = ply["clock_after_seconds"]
+    if bank and left is not None and (game or {}).get("speed") not in insights.UNTIMED_SPEEDS:
+        facts["clock_fraction_left"] = round(left / bank, 3)
+        facts["time_pressure"] = left / bank <= insights.TIME_TROUBLE_FRACTION
     return facts
 
 
@@ -166,11 +199,28 @@ def _summarize(annotated: list[dict]) -> dict:
         if move["cp_lost"] is not None:
             by_phase.setdefault(move["phase"], []).append(move["cp_lost"])
 
+    # Positions that were already decided inflate the headline average: a move
+    # that gives up another 400cp when three pieces down is not the player being
+    # inaccurate. The conventional number stays first so it remains comparable to
+    # what Lichess and Chess.com report; the second is the honest one to coach on.
+    competitive = [
+        m
+        for m in scored
+        if m.get("eval_before_cp") is not None
+        and abs(m["eval_before_cp"]) <= classify.DECIDED_CP
+    ]
+
     return {
         "moves_played": len(annotated),
         "average_centipawn_loss": (
             round(sum(m["cp_lost"] for m in scored) / len(scored), 1) if scored else None
         ),
+        "average_centipawn_loss_competitive": (
+            round(sum(m["cp_lost"] for m in competitive) / len(competitive), 1)
+            if competitive
+            else None
+        ),
+        "moves_in_competitive_positions": len(competitive),
         "severity_counts": counts,
         "average_centipawn_loss_by_phase": {
             phase: round(sum(losses) / len(losses), 1) for phase, losses in by_phase.items()
@@ -184,12 +234,38 @@ def _summarize(annotated: list[dict]) -> dict:
 
 
 def _critical(annotated: list[dict], limit: int) -> list[dict]:
-    """The worst moves, ranked by centipawn loss, restored to board order."""
+    """The costliest moves, ranked by expected score thrown away, in board order.
+
+    Ranked on win probability rather than centipawn loss, which does not survive
+    contact with the extremes this function exclusively looks at. Centipawn loss is
+    clamped at MAX_REPORTED_CP_LOSS, so every move that allows mate lands on the
+    identical value and the top-N becomes an arbitrary slice of a large tie -- in a
+    100-game job, 48 moves sat on the ceiling for 25 places, and no move that lost
+    less than the cap could ever be selected however instructive it was.
+
+    Removing the clamp would not fix it. Unclamped, those same moves score ~99000
+    and fill every slot deterministically instead of arbitrarily, including the ones
+    played from positions that were lost twenty moves earlier. The unit is the
+    problem: centipawns measure the position, and selection has to measure what the
+    mistake cost.
+    """
     ranked = sorted(
-        (m for m in annotated if m["cp_lost"]),
-        key=lambda m: m["cp_lost"],
+        (
+            m
+            for m in annotated
+            if m.get("win_prob_lost") is not None and m["win_prob_lost"] > 0
+        ),
+        key=lambda m: m["win_prob_lost"],
         reverse=True,
     )
+    # Fall back to centipawns for jobs analysed before the pre-move evaluation was
+    # stored, where win_prob_lost is null for every move.
+    if not ranked:
+        ranked = sorted(
+            (m for m in annotated if m["cp_lost"]),
+            key=lambda m: m["cp_lost"],
+            reverse=True,
+        )
     return sorted(ranked[:limit], key=lambda m: m["ply"])
 
 
@@ -324,6 +400,8 @@ async def explain_move(
         move_uci=move_uci,
         eval_diff_cp=diff,
         best_move_uci=before_eval["best_move"],
+        score_cp_before=before_eval["score_cp"],
+        mate_in_before=before_eval["mate_in"],
         score_cp_after=after_eval["score_cp"],
         mate_in_after=after_eval["mate_in"],
         best_pv_uci=before_eval["principal_variation"],
@@ -364,7 +442,7 @@ async def game_moves(game_id: str, depth: int | None = None) -> dict:
 
     moves = []
     for ply in plies:
-        facts = _annotate(ply)
+        facts = _annotate(ply, game)
         moves.append(
             {
                 **facts,
@@ -393,14 +471,21 @@ async def explain_game(game_id: str, depth: int | None = None, refresh: bool = F
     if not plies:
         raise LookupError(f"Game {game_id} has no analyzed positions at depth {depth}.")
 
-    own = [_annotate(p) for p in plies if p["mover"] == game["user_color"]]
+    every_move = [_annotate(p, game) for p in plies]
+    own = [m for m in every_move if m["side_to_move"] == game["user_color"]]
     stats = _summarize(own)
     moments = _critical(own, CRITICAL_MOMENTS_PER_GAME)
+
+    # Numbered against the whole job so "Game 3" means the same game here as it
+    # does in the sidebar and in the cross-game report.
+    index = GameIndex(await list_games(game["job_id"]))
+    index.record_plies(game_id, every_move)
 
     payload = {
         "task": (
             "Review this game for the player. Summarize how the game went, explain each "
-            "critical moment, and end with one takeaway they can act on."
+            "critical moment, and end with one takeaway they can act on. This is a "
+            "single game, so cite positions with the bare [#ply] form."
         ),
         "player": {
             "colour": game["user_color"],
@@ -410,7 +495,7 @@ async def explain_game(game_id: str, depth: int | None = None, refresh: bool = F
             "time_control": game["speed"],
         },
         "statistics": stats,
-        "critical_moments": moments,
+        "critical_moments": index.swap_ids(moments),
     }
     feedback = await llm.generate(
         kind="game",
@@ -419,7 +504,14 @@ async def explain_game(game_id: str, depth: int | None = None, refresh: bool = F
         schema=GameFeedback,
         refresh=refresh,
     )
-    return {"game": game, "statistics": stats, "critical_moments": moments, "feedback": feedback}
+    feedback, cited = index.resolve(feedback, default_game_id=game_id)
+    return {
+        "game": game,
+        "statistics": stats,
+        "critical_moments": moments,
+        "feedback": feedback,
+        "citations": cited,
+    }
 
 
 def _by_time_control(
@@ -456,6 +548,7 @@ def _by_time_control(
             "games": len(speed_games),
             "score_pct": round(100 * sum(scores) / len(scores)) if scores else None,
             "accuracy": _summarize(moves),
+            "rates": insights.pattern_rates(moves),
             "clock": insights.timing_summary(
                 moves, banks.pop() if len(banks) == 1 else None
             ),
@@ -497,10 +590,12 @@ async def list_openings(job_id: str, depth: int | None = None) -> list[dict]:
                 "games": 0,
                 "score": 0.0,
                 "game_ids": [],
+                "game_numbers": [],
             },
         )
         entry["games"] += 1
         entry["game_ids"].append(game["game_id"])
+        entry["game_numbers"].append(game["number"])
         if game["user_score"] is not None:
             entry["score"] += game["user_score"]
 
@@ -531,7 +626,9 @@ async def coach_opening(
     """
     depth = depth or settings.stockfish_default_depth
 
-    games = [g for g in await list_games(job_id) if g["analyzed"]]
+    all_games = await list_games(job_id)
+    index = GameIndex(all_games)
+    games = [g for g in all_games if g["analyzed"]]
     target = opening.casefold()
     matching = [
         g
@@ -549,7 +646,8 @@ async def coach_opening(
         if not opening_plies:
             continue
 
-        annotated = [_annotate(p) for p in opening_plies]
+        annotated = [_annotate(p, game) for p in opening_plies]
+        index.record_plies(game["game_id"], annotated)
         played.append(
             {
                 "game_id": game["game_id"],
@@ -563,6 +661,7 @@ async def coach_opening(
                 # moves make no sense without what they were answering.
                 "moves": [
                     {
+                        "ply": m["ply"],
                         "move_number": m["move_number"],
                         "side": m["side_to_move"],
                         "san": m["played_san"],
@@ -596,8 +695,10 @@ async def coach_opening(
             "rating": matching[0]["user_rating"],
             "games_in_this_opening": len(played),
         },
+        "games_index": index.payload_index(matching),
         "games": played,
     }
+    payload = index.swap_ids(payload)
     feedback = await llm.generate(
         kind="opening",
         subject=f"{job_id}:{opening}:{colour or 'both'}",
@@ -608,7 +709,13 @@ async def coach_opening(
         effort="high",
         refresh=refresh,
     )
-    return {"opening": opening, "games": played, "feedback": feedback}
+    feedback, cited = index.resolve(feedback)
+    return {
+        "opening": opening,
+        "games": index.scope(matching),
+        "feedback": feedback,
+        "citations": cited,
+    }
 
 
 async def build_report(
@@ -641,7 +748,11 @@ async def build_report(
             "partial data."
         )
 
-    games = [g for g in await list_games(job_id) if g["analyzed"]]
+    all_games = await list_games(job_id)
+    # Numbered over every game in the job, before the speed filter, so a filtered
+    # report still uses the same G-numbers as the sidebar and the game reviews.
+    index = GameIndex(all_games)
+    games = [g for g in all_games if g["analyzed"]]
     if speed:
         games = [g for g in games if g["speed"] == speed]
         if not games:
@@ -664,10 +775,11 @@ async def build_report(
         if not plies:
             continue
 
-        every_move = [_annotate(p) for p in plies]
+        every_move = [_annotate(p, game) for p in plies]
         for move in every_move:
             move["colour"] = game["user_color"]
             move["speed"] = game["speed"]
+        index.record_plies(game["game_id"], every_move)
 
         own = [m for m in every_move if m["side_to_move"] == game["user_color"]]
         if not own:
@@ -730,7 +842,10 @@ async def build_report(
     payload = {
         "task": (
             "Identify this player's recurring patterns across these games. Name real "
-            "habits visible in the data, not one-off mistakes. Every theme must cite "
+            "habits visible in the data, not one-off mistakes. Every claim about how "
+            "OFTEN something happens must come from the rates section, never from "
+            "counting the critical moments -- those are a dozen selected examples, "
+            "not a sample to generalise from. Every theme must cite "
             "specific moves or numbers from the supplied sections as evidence. Cover "
             "their openings, their clock use, and whether they convert winning "
             "positions, but only where the data supports a claim -- say nothing about "
@@ -747,7 +862,11 @@ async def build_report(
             "time_controls": speeds_present,
             "filtered_to_speed": speed,
         },
+        "games_index": index.payload_index(games),
         "overall": _summarize(all_moves),
+        # The denominators. Without these the model is naming habits from a dozen
+        # examples with no idea how often anything happens.
+        "rates": insights.pattern_rates(all_moves),
         "as_white": _summarize(as_white) if as_white else None,
         "as_black": _summarize(as_black) if as_black else None,
         "by_time_control": _by_time_control(
@@ -775,6 +894,7 @@ async def build_report(
         "per_game": per_game,
         "critical_moments": _critical(all_moves, CRITICAL_MOMENTS_PER_REPORT),
     }
+    payload = index.swap_ids(payload)
     feedback = await llm.generate(
         kind="report",
         subject=f"{job_id}:{speed}" if speed else job_id,
@@ -785,6 +905,7 @@ async def build_report(
         effort="high",
         refresh=refresh,
     )
+    feedback, cited = index.resolve(feedback)
     return {
         "statistics": payload["overall"],
         "by_time_control": payload["by_time_control"],
@@ -794,6 +915,9 @@ async def build_report(
         "conversion": payload["conversion"],
         "missed_punishment": payload["missed_punishment"],
         "sessions": payload["sessions"],
-        "per_game": per_game,
+        "rates": payload["rates"],
+        "per_game": payload["per_game"],
+        "games": index.scope(games),
         "feedback": feedback,
+        "citations": cited,
     }

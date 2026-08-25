@@ -348,3 +348,144 @@ def test_castling_matches_despite_differing_uci_conventions():
     assert _match_move(options, {"move_uci": "e1g1", "move_san": "O-O"})["san"] == "O-O"
     assert _match_move(options, {"move_uci": "d2d4", "move_san": "d4"})["san"] == "d4"
     assert _match_move(options, {"move_uci": "h2h4", "move_san": "h4"}) is None
+
+
+# --------------------------------------------------------------------------- #
+# Win probability and how critical moments get chosen
+# --------------------------------------------------------------------------- #
+
+def test_win_probability_folds_in_mate_and_survives_mate_scores():
+    assert classify.win_probability(0) == pytest.approx(0.5)
+    assert classify.win_probability(None) is None
+    assert classify.win_probability(320) == pytest.approx(0.731, abs=0.001)
+    assert classify.win_probability(-320) == pytest.approx(0.269, abs=0.001)
+    # Mate wins outright regardless of the centipawn field.
+    assert classify.win_probability(None, mate_in=3) == 1.0
+    assert classify.win_probability(None, mate_in=-3) == 0.0
+    # Mate is reported as +/-100000 cp, which overflows exp() if not clamped.
+    assert classify.win_probability(100_000) == pytest.approx(1.0)
+    assert classify.win_probability(-100_000) == pytest.approx(0.0)
+
+
+def test_position_state_is_read_from_the_movers_side():
+    assert classify.position_state(900, None, mover_is_white=True) == "winning"
+    assert classify.position_state(900, None, mover_is_white=False) == "losing"
+    assert classify.position_state(0, None, mover_is_white=True) == "competitive"
+    assert classify.position_state(None, 2, mover_is_white=True) == "winning"
+    assert classify.position_state(None, None, mover_is_white=True) is None
+
+
+def test_a_losing_move_costs_less_expected_score_the_more_lost_you_already_were():
+    """The whole reason selection moved off centipawns."""
+    def cost(before, after):
+        return classify.describe_move(
+            fen_before=chess.STARTING_FEN, move_uci="e2e4", eval_diff_cp=after - before,
+            best_move_uci="d2d4", score_cp_before=before, mate_in_before=None,
+            score_cp_after=after, mate_in_after=None,
+        )["win_prob_lost"]
+
+    from_even = cost(0, -400)
+    from_lost = cost(-2000, -2400)
+    assert from_even > 25          # gave away most of a playable game
+    assert from_lost < 2           # gave away almost nothing that was left
+    # Identical centipawn swings, wildly different real cost.
+    assert from_even > from_lost * 10
+
+
+def _moment(ply, cp, wp, state="competitive"):
+    return {"ply": ply, "cp_lost": cp, "win_prob_lost": wp, "position_state": state,
+            "severity": "blunder", "tags": [], "phase": "middlegame"}
+
+
+def test_critical_moments_are_not_an_arbitrary_slice_of_a_clamped_tie():
+    """The bug this replaced: every mate-allowing move lands on MAX_REPORTED_CP_LOSS,
+    so ranking by centipawns picked N of a large tie and could never surface a
+    genuinely instructive move that lost slightly less."""
+    from app.services.feedback import _critical
+
+    tied = [_moment(p, classify.MAX_REPORTED_CP_LOSS, 1.0, "losing") for p in range(1, 21)]
+    real = _moment(99, 600, 55.0)
+    picked = _critical(tied + [real], 5)
+
+    assert real in picked, "a real blunder must outrank throwing away a lost position"
+    assert picked == sorted(picked, key=lambda m: m["ply"]), "returned in board order"
+
+
+def test_critical_moments_fall_back_to_centipawns_for_older_jobs():
+    """Jobs analysed before the pre-move evaluation was stored have no win
+    probability on any move, and must still produce a review rather than nothing."""
+    from app.services.feedback import _critical
+
+    old = [{"ply": p, "cp_lost": p * 100, "win_prob_lost": None} for p in (1, 2, 3)]
+    assert [m["ply"] for m in _critical(old, 2)] == [2, 3]
+
+
+# --------------------------------------------------------------------------- #
+# Pattern rates -- the denominators
+# --------------------------------------------------------------------------- #
+
+def _rated(severity, cp, tags=(), phase="middlegame", state="competitive", clock=None):
+    m = {"severity": severity, "cp_lost": cp, "tags": list(tags), "phase": phase,
+         "position_state": state}
+    if clock is not None:
+        m["clock_fraction_left"] = clock
+    return m
+
+
+def test_pattern_rates_reports_a_common_move_type_as_not_a_weakness():
+    """Captures were 21% of one player's blunders and 24% of all their moves, which
+    reads damning without the denominator. Enrichment at or below 1.0 is what stops
+    the report inventing a weakness out of a base rate."""
+    moves = ([_rated("blunder", 400, ["capture"])] * 2
+             + [_rated("blunder", 400)] * 8
+             + [_rated("ok", 10, ["capture"])] * 30
+             + [_rated("ok", 10)] * 60)
+    rates = insights.pattern_rates(moves)
+
+    capture = rates["move_type_enrichment"]["capture"]
+    assert capture["share_of_blunders_pct"] == 20.0
+    assert capture["share_of_all_moves_pct"] == 32.0
+    assert capture["enrichment"] < 1.0
+
+
+def test_pattern_rates_separates_blundering_a_won_game_from_blundering_a_close_one():
+    moves = ([_rated("blunder", 400, state="winning")] * 5
+             + [_rated("ok", 10, state="winning")] * 5
+             + [_rated("blunder", 400, state="competitive")] * 5
+             + [_rated("ok", 10, state="competitive")] * 95)
+    rates = insights.pattern_rates(moves)
+
+    assert rates["by_position_state"]["winning"]["blunder_rate_pct"] == 50.0
+    assert rates["by_position_state"]["competitive"]["blunder_rate_pct"] == 5.0
+
+
+def test_pattern_rates_stays_silent_on_a_sample_too_small_to_mean_anything():
+    assert insights.pattern_rates([_rated("blunder", 400)] * 10) is None
+
+
+def test_a_marginal_skew_is_called_average_rather_than_a_weakness():
+    """A hard 1.0 cut turns rounding into a finding. One real player's
+    "was in check" sat at 1.18x -- a 6.2% blunder rate against 5.2% -- which is
+    noise, and naming it a weakness is how a report fills up with invented patterns."""
+    # 11% of blunders, 10% of all moves: a 1.1x skew, i.e. nothing.
+    moves = ([_rated("blunder", 400, ["was_in_check"])] * 11
+             + [_rated("blunder", 400)] * 89
+             + [_rated("ok", 10, ["was_in_check"])] * 100
+             + [_rated("ok", 10)] * 900)
+    entry = insights.pattern_rates(moves)["move_type_enrichment"]["was_in_check"]
+
+    assert entry["enrichment"] == pytest.approx(1.1, abs=0.02)
+    assert entry["verdict"] == "about average"
+
+
+def test_a_real_skew_and_a_real_strength_both_get_named():
+    moves = ([_rated("blunder", 400, ["hangs_piece"])] * 40
+             + [_rated("blunder", 400, ["capture"])] * 2
+             + [_rated("blunder", 400)] * 58
+             + [_rated("ok", 10, ["hangs_piece"])] * 60
+             + [_rated("ok", 10, ["capture"])] * 300
+             + [_rated("ok", 10)] * 540)
+    tags = insights.pattern_rates(moves)["move_type_enrichment"]
+
+    assert tags["hangs_piece"]["verdict"] == "over-represented"
+    assert tags["capture"]["verdict"] == "not a weakness"

@@ -8,6 +8,8 @@ rather than judgement calls, because a wrong tag becomes a confidently wrong
 sentence in the coaching output.
 """
 
+import math
+
 import chess
 
 PIECE_VALUES = {
@@ -42,7 +44,43 @@ OPENING_MOVES = 12
 # single-handedly dominate any average taken over a game. The severity label and
 # the allows_forced_mate tag already carry that the move was catastrophic, so the
 # number itself gets capped to keep aggregate stats meaningful.
+#
+# The cap is right for averaging and wrong for ranking, which is what win_prob_lost
+# below exists for: every mate-allowing move lands on exactly this value, so sorting
+# by centipawn loss collapses them into one indistinguishable tie at the ceiling.
 MAX_REPORTED_CP_LOSS = 1000
+
+# Centipawns beyond which a position is treated as already decided. Loss taken from
+# such a position is mostly not a lesson -- walking into mate when already down a
+# queen is a formality, not the error that lost the game.
+DECIDED_CP = 500
+
+# Logistic scale converting a centipawn evaluation into an expected score. Shared
+# with the eval bar in the UI so the two never disagree.
+#
+# Lichess publishes a scale of 1/271.6, fitted against games between 2300-rated
+# players. Deliberately not used here: checked against this app's own games, that
+# curve badly under-rates losing positions at club level -- it calls a -5 position
+# a 3.5% expected score where the real games score far higher, because below master
+# level a lost position is still very much alive. A flatter curve is the safer error
+# for coaching, since the alternative is telling a player that throwing away a bad
+# position cost them nothing.
+WIN_PROB_SCALE = 320
+
+
+def win_probability(score_cp: int | None, mate_in: int | None = None) -> float | None:
+    """Expected score for White, 0..1, from an engine evaluation.
+
+    Expected score rather than literal win probability: draws are folded in, the
+    same way Lichess's published "Win%" does it.
+    """
+    if mate_in is not None:
+        return 1.0 if mate_in > 0 else 0.0
+    if score_cp is None:
+        return None
+    # Mate is reported as +/-100000 centipawns, which overflows exp() unclamped.
+    exponent = max(-40.0, min(40.0, score_cp / WIN_PROB_SCALE))
+    return 1 / (1 + math.exp(-exponent))
 
 
 def classify_severity(eval_diff_cp: int | None) -> str:
@@ -160,6 +198,8 @@ def describe_move(
     mate_in_after: int | None,
     best_pv_uci: list[str] | None = None,
     move_number: int | None = None,
+    score_cp_before: int | None = None,
+    mate_in_before: int | None = None,
 ) -> dict:
     """Facts about one move, ready to hand to the LLM layer verbatim.
 
@@ -205,16 +245,64 @@ def describe_move(
         mate_favours_mover = (mate_in_after > 0) == mover_is_white
         tags.append("has_forced_mate" if mate_favours_mover else "allows_forced_mate")
 
+    # How much of the game the move actually threw away, as expected score. This
+    # is what "how bad was it" has to mean for ranking: -800 to -1200 is a rounding
+    # error and +100 to -300 is most of the game, and centipawns rate them alike.
+    mover_is_white = board.turn == chess.WHITE
+
+    def for_mover(score: int | None, mate: int | None) -> float | None:
+        chance = win_probability(score, mate)
+        return None if chance is None else (chance if mover_is_white else 1 - chance)
+
+    before_chance = for_mover(score_cp_before, mate_in_before)
+    after_chance = for_mover(score_cp_after, mate_in_after)
+    if before_chance is None or after_chance is None:
+        win_prob_lost = None
+    elif played_best:
+        # Same reasoning as the severity label: the engine's own first choice is
+        # never charged for the swing, which carries search noise at both ends.
+        win_prob_lost = 0.0
+    else:
+        win_prob_lost = round(100 * (before_chance - after_chance), 1)
+
     return {
         "played_san": played_san,
         "played_uci": move_uci,
         "best_san": best_san,
+        # UCI as well as SAN because the board draws the engine's choice as an
+        # arrow, which needs the two squares rather than the algebraic name.
+        "best_uci": best_move_uci if best_san else None,
         "best_line_san": pv_to_san(fen_before, best_pv_uci or []),
         "severity": "ok" if played_best else classify_severity(eval_diff_cp),
         "cp_lost": cp_lost(eval_diff_cp),
+        "eval_before_cp": None if is_mate_score(score_cp_before) else score_cp_before,
         "eval_after_cp": None if is_mate_score(score_cp_after) else score_cp_after,
+        # Percentage points of expected score, from the mover's own perspective.
+        "win_prob_lost": win_prob_lost,
+        "position_state": position_state(score_cp_before, mate_in_before, mover_is_white),
         "mate_in": mate_in_after,
         "phase": phase(board, move_number),
         "side_to_move": "white" if board.turn == chess.WHITE else "black",
         "tags": tags,
     }
+
+
+def position_state(
+    score_cp: int | None, mate_in: int | None, mover_is_white: bool
+) -> str | None:
+    """Whether the mover was already winning, already lost, or still in a game.
+
+    Sent with every critical moment because it decides whether a mistake is worth
+    coaching -- and because blundering a won position is a different habit from
+    blundering an equal one, and needs different advice.
+    """
+    if mate_in is not None:
+        return "winning" if (mate_in > 0) == mover_is_white else "losing"
+    if score_cp is None:
+        return None
+    from_mover = score_cp if mover_is_white else -score_cp
+    if from_mover > DECIDED_CP:
+        return "winning"
+    if from_mover < -DECIDED_CP:
+        return "losing"
+    return "competitive"

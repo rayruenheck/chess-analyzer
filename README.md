@@ -48,7 +48,7 @@ pip install -r requirements-dev.txt
 venv\Scripts\python -m pytest
 ```
 
-92 tests, ~7 seconds, and safe to run at any time: **no test reaches the network or
+117 tests, ~7 seconds, and safe to run at any time: **no test reaches the network or
 touches `data/chess_analyzer.db`.** Every model call is stubbed (they cost money),
 every platform and explorer call is stubbed (rate limits and flakiness), Stockfish is
 never launched, and each test gets a fresh SQLite file under `tmp_path`. The `client`
@@ -61,6 +61,7 @@ model without being stubbed fails as a recognisable 503 rather than quietly bill
 | `tests/test_endpoints.py` | Every route: shapes, status codes, the guards, and what each endpoint actually sends the model |
 | `tests/test_analysis.py` | The deterministic layers — severity, phase, timing, openings, conversion, platform parsing |
 | `tests/test_llm.py` | Caching, cache-key invalidation, and turning model failures into actionable errors |
+| `tests/test_citations.py` | Game numbering, and resolving the model's `[G3#47]` tokens into links that cannot point at the wrong position |
 
 `seed()` writes rows rather than running the pipeline, which keeps the endpoint tests
 off Stockfish and lets them assert on states a successful run never produces — a
@@ -75,6 +76,8 @@ produced confidently wrong coaching. Those are worth keeping honest:
 - castling matches the explorer despite `e1g1` vs `e1h1`
 - a cached answer is never bought twice, and bumping `PROMPT_VERSION` retires text
   written under the old rubric
+- no endpoint shows the model a raw game id, and a citation it invents degrades to
+  plain text instead of becoming a link to the wrong board position
 
 ## Endpoints
 
@@ -127,8 +130,61 @@ you only pay for feedback on games you actually open. Every response is cached i
 `llm_feedback` keyed by a hash of the exact request, so re-reads are free. Pass
 `refresh=true` to regenerate.
 
+*What the model is sent, and why.* Two rules shape the payload, both learned from
+getting them wrong on real data.
+
+**Selection is ranked by expected score, not centipawns.** `MAX_REPORTED_CP_LOSS`
+clamps every mate-allowing move to the same 1000, which is correct for averaging and
+ruinous for sorting: on a 100-game job, 48 moves sat on the ceiling competing for 25
+places, so the critical moments were an arbitrary slice of one tie and no move losing
+less than the cap could ever be selected, however instructive. Removing the clamp
+would only make the failure deterministic instead of random — unclamped, those moves
+score ~99000 and still take every slot. Centipawns measure the *position*; selection
+has to measure what the mistake *cost*, so `_critical` ranks on `win_prob_lost`.
+Eight of the old top 25 came from positions already lost by 500+ centipawns (one from
+−8032); the new selection contains none. The severity bands and the headline ACPL
+still use centipawns, which is the right unit for both and keeps ACPL comparable to
+other sites — `average_centipawn_loss_competitive` is reported alongside it.
+
+The win-probability curve is a logistic on centipawns, the same one the eval bar
+draws, at `WIN_PROB_SCALE = 320`. Lichess publishes 1/271.6, fitted on 2300-rated
+games; checked against this app's own games that curve badly under-rates losing
+positions at club level, where a −5 is still very much alive. A flatter curve is the
+safer error, since the alternative is telling a player that throwing away a bad
+position cost them nothing.
+
+**Frequency claims come from rates, never from examples.** `insights.pattern_rates`
+sends blunder rates by phase, by clock remaining and by whether the position was
+already won or lost, plus, per move type, its share of blunders against its share of
+all moves. Without that denominator a model asked to name recurring habits will find
+them whether they exist or not: captures were 21% of one player's blunders, which
+reads damning until you know they are 24% of every move they play. Each move type
+carries a `verdict` decided server-side, so the coaching text and the UI cannot
+disagree about what counts as a weakness — and the band is deliberately not a hard
+1.0 cut, since "was in check" at 1.18× is a 6.2% blunder rate against 5.2% and
+naming that is how a report fills with patterns that are not there. Critical moments
+were cut from 25 to 12 in the same change: a dozen examples plus real rates beats a
+long tail of ties, and costs fewer tokens.
+
+The report tab renders all of this — both accuracy figures, and the blunder-rate
+breakdowns as bars on one shared scale with a tick at the player's overall rate, so
+each bucket reads as above or below their own average.
+
+*Citations.* The model never sees a database game id. `app/services/citations.py`
+hands it games numbered `G1..Gn` -- the same numbers the sidebar shows -- and asks it
+to cite claims inline as `[G3#47]`: game three, ply forty-seven. Coming back, those
+tokens are resolved server-side against the move list into `[[c0]]` markers plus a
+`citations` array carrying the game id, the ply and the move in SAN, which the UI
+renders as links that open that game at that position. Resolution is server-side
+because only the server has the move list: the token says ply 47, but the reader
+needs to see "24.Qxh7". A citation naming a game that does not exist, or a ply that
+was never analyzed, degrades to plain text or to a game-level link rather than
+becoming a link to the wrong position. Numbering is assigned over the whole job
+before any filtering, so a report narrowed to one time control still agrees with the
+sidebar.
+
 - `GET /feedback/games/{job_id}` -- games a job analyzed, with the colour the player
-  had. No model call.
+  had, its `number`, and its opening family. No model call.
 - `GET /feedback/game/{game_id}/moves` -- every ply with its evaluation, severity and
   engine line, for stepping through a board. No model call, so the UI renders before
   spending anything.
@@ -253,3 +309,35 @@ kinds of tables, kept deliberately separate:
   burned is their previous reading plus the increment earned minus what they have now.
   Correspondence games are stored but excluded from clock analysis, since their
   readings are calendar time rather than thinking time.
+
+## The board
+
+`app/static/index.html` is the whole UI: one file, no CDN, no build step, no
+dependencies. The board is drawn from the FEN with CSS grid, so it works with the
+network down.
+
+The pieces are the one imported asset. They are the Cburnett/Wikimedia SVG set --
+the same artwork Wikipedia and Lichess use -- as a single sprite in
+`app/static/pieces.svg`, taken from the `cm-chessboard` package. They replaced
+unicode glyphs, which had no white pieces of their own: `♟` recoloured white with a
+text-shadow, which rendered thin and differed by system font. The sprite is injected
+into the document once and each square is a `<use>` reference; an external
+`<use href="file.svg#id">` would have been tidier but is subject to CORS and fails
+from a `file://` origin, and the unicode glyphs remain as a fallback if the fetch
+fails.
+
+> Piece artwork © [Cburnett](https://en.wikipedia.org/wiki/User:Cburnett) and
+> [Rfc1394](https://en.wikipedia.org/wiki/User:Rfc1394), from
+> [Wikimedia Commons](https://commons.wikimedia.org/wiki/Category:SVG_chess_pieces/Standard),
+> licensed [CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/), modified
+> by shaack for cm-chessboard. Only this artwork is imported -- no board library.
+
+Deliberately *not* imported: `chessground` (Lichess's board) is GPL-3.0 and would
+relicense the project, and a full board library would mean re-plumbing the eval bar,
+seats and citation links to buy a drag-and-drop move input this replay viewer has no
+use for.
+
+The board also draws the engine's choice **for the position currently shown** as an
+arrow -- which is the *next* ply's best move, since that ply was searched from this
+exact position -- and blooms the king's square on check. The eval bar's fill is
+always White's share; which end it grows from follows the board's orientation.

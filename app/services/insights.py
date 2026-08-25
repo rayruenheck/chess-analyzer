@@ -309,6 +309,120 @@ def missed_punishment(moves: list[dict], colour: str) -> list[dict]:
 
 
 # --------------------------------------------------------------------------- #
+# Pattern rates
+# --------------------------------------------------------------------------- #
+
+# Move properties worth testing for over-representation among blunders. Each is a
+# tag classify.py sets from board geometry or engine output, so all of them are
+# certain rather than judgement calls.
+BLUNDER_TAGS = ("hangs_piece", "capture", "gives_check", "was_in_check", "allows_forced_mate")
+
+# Enrichment outside this band counts as a real skew. A hard 1.0 cut would turn
+# rounding into a finding -- "was in check" at 1.18x is a 6.2% blunder rate against
+# 5.2%, which is nothing, and reporting it as a weakness is how a report ends up
+# full of patterns that are not there.
+ENRICHED_ABOVE = 1.25
+ENRICHED_BELOW = 0.8
+
+CLOCK_BANDS = (
+    ("under 10% left", 0.0, 0.10),
+    ("10-20% left", 0.10, 0.20),
+    ("20-50% left", 0.20, 0.50),
+    ("over 50% left", 0.50, 1.01),
+)
+
+
+def _rate(moves: list[dict]) -> dict:
+    blunders = sum(1 for m in moves if m["severity"] == "blunder")
+    scored = [m for m in moves if m.get("cp_lost") is not None]
+    return {
+        "moves": len(moves),
+        "blunder_rate_pct": round(100 * blunders / len(moves), 1) if moves else None,
+        "average_centipawn_loss": _mean([m["cp_lost"] for m in scored]),
+    }
+
+
+def pattern_rates(moves: list[dict]) -> dict | None:
+    """Blunder rates with the denominators the model needs to read them.
+
+    This is the section that separates a habit from a coincidence. Every other
+    part of the report hands over *examples*; a handful of moves says nothing about
+    frequency, and a model asked to name recurring patterns from examples alone
+    will find them whether or not they exist. Captures are the standing case: they
+    are 21% of this player's blunders, which reads damning until you know they are
+    24% of every move played, so captures are in fact where they are safest.
+
+    Rates are computed over every scored move, not over the selected moments, and
+    each tag reports its share of blunders against its share of all moves so the
+    comparison cannot be lost.
+    """
+    scored = [m for m in moves if m.get("cp_lost") is not None]
+    if len(scored) < 40:
+        return None
+
+    blunders = [m for m in scored if m["severity"] == "blunder"]
+
+    by_phase = {
+        phase: _rate([m for m in scored if m.get("phase") == phase])
+        for phase in ("opening", "middlegame", "endgame")
+        if any(m.get("phase") == phase for m in scored)
+    }
+
+    timed = [m for m in scored if m.get("clock_fraction_left") is not None]
+    by_clock = {
+        label: _rate([m for m in timed if low <= m["clock_fraction_left"] < high])
+        for label, low, high in CLOCK_BANDS
+        if any(low <= m["clock_fraction_left"] < high for m in timed)
+    }
+
+    by_state = {
+        state: _rate([m for m in scored if m.get("position_state") == state])
+        for state in ("winning", "competitive", "losing")
+        if any(m.get("position_state") == state for m in scored)
+    }
+
+    enrichment = {}
+    for tag in BLUNDER_TAGS:
+        overall = sum(1 for m in scored if tag in m.get("tags", []))
+        if not overall:
+            continue
+        share_all = 100 * overall / len(scored)
+        share_blunders = 100 * sum(1 for m in blunders if tag in m["tags"]) / len(blunders) if blunders else 0.0
+        ratio = share_blunders / share_all if share_all else None
+        enrichment[tag] = {
+            "share_of_blunders_pct": round(share_blunders, 1),
+            "share_of_all_moves_pct": round(share_all, 1),
+            "enrichment": round(ratio, 2) if ratio is not None else None,
+            # Decided here rather than at each display site so the coaching text and
+            # the UI can never disagree about what counts as a weakness.
+            "verdict": (
+                None if ratio is None
+                else "over-represented" if ratio >= ENRICHED_ABOVE
+                else "not a weakness" if ratio <= ENRICHED_BELOW
+                else "about average"
+            ),
+        }
+
+    return {
+        "scored_moves": len(scored),
+        "blunders": len(blunders),
+        "blunder_rate_pct": round(100 * len(blunders) / len(scored), 1),
+        "reading_this": (
+            "Rates are over every scored move in the sample, not over the critical "
+            "moments listed elsewhere. Use this section for any claim about how "
+            "often something happens. Each move type carries a verdict: only "
+            "'over-represented' is a weakness worth naming. 'about average' means "
+            "the skew is noise and must not be reported as a pattern, and 'not a "
+            "weakness' is a strength you may say the player is solid at."
+        ),
+        "by_phase": by_phase,
+        "by_clock_remaining": by_clock or None,
+        "by_position_state": by_state or None,
+        "move_type_enrichment": enrichment or None,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Sessions
 # --------------------------------------------------------------------------- #
 
