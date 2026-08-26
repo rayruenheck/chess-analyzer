@@ -10,7 +10,7 @@ apart late in a session -- and returns None when the data cannot support an answ
 so the report can stay silent instead of guessing.
 """
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 # Evaluation, in centipawns from the player's own perspective, at which a position
 # is considered winning enough that failing to win it is worth remarking on.
@@ -342,6 +342,19 @@ def _rate(moves: list[dict]) -> dict:
     }
 
 
+# Themes Lichess serves a ready-made puzzle set for. Building a drill is then a
+# URL rather than a 250MB download of the puzzle database: the tactic that keeps
+# punishing this player names the exact set they should be practising.
+PUZZLE_THEMES = {
+    "fork", "pin", "skewer", "discoveredAttack", "hangingPiece",
+    "backRankMate", "doubleCheck", "promotion",
+}
+
+
+def drill_for(theme: str) -> str | None:
+    return f"https://lichess.org/training/{theme}" if theme in PUZZLE_THEMES else None
+
+
 def pattern_rates(moves: list[dict]) -> dict | None:
     """Blunder rates with the denominators the model needs to read them.
 
@@ -403,10 +416,73 @@ def pattern_rates(moves: list[dict]) -> dict | None:
             ),
         }
 
+    # The hope-chess number. Of the blunders whose refutation we know, how many
+    # were punished by a check or a capture -- something one ply of looking would
+    # have revealed. A high share is a missing habit rather than a skill ceiling,
+    # and it is the most directly fixable thing a club player can be told.
+    known = [m for m in blunders if m.get("refutation_is_forcing") is not None]
+    forcing = None
+    if len(known) >= 10:
+        forcing = {
+            "blunders_with_a_known_refutation": len(known),
+            "punished_by_a_check_or_capture_pct": round(
+                100 * sum(1 for m in known if m["refutation_is_forcing"]) / len(known), 1
+            ),
+            "what_this_means": (
+                "A forcing refutation is one the player would have found by asking "
+                "what their opponent's checks and captures were before moving. A high "
+                "share points at that missing habit, not at calculation depth."
+            ),
+        }
+
+    # Which tactics keep punishing this player -- with base rates, for the same
+    # reason every other proportion here carries one. Pins turn up in a third of
+    # one player's blunders and look damning until you notice they turn up in a
+    # quarter of every move they play; the fork count is a fifth the size and three
+    # times the signal. Raw counts would prescribe the wrong drill.
+    in_blunders = Counter(t for m in blunders for t in (m.get("punished_by") or []))
+    in_all = Counter(t for m in scored for t in (m.get("punished_by") or []))
+    tactics = None
+    if in_blunders and blunders:
+        rows = {}
+        for theme, count in in_blunders.most_common():
+            share_blunders = 100 * count / len(blunders)
+            share_all = 100 * in_all[theme] / len(scored)
+            ratio = share_blunders / share_all if share_all else None
+            rows[theme] = {
+                "in_blunders": count,
+                "share_of_blunders_pct": round(share_blunders, 1),
+                "share_of_all_moves_pct": round(share_all, 1),
+                "enrichment": round(ratio, 2) if ratio else None,
+                "verdict": (
+                    None if ratio is None
+                    else "over-represented" if ratio >= ENRICHED_ABOVE
+                    else "not a weakness" if ratio <= ENRICHED_BELOW
+                    else "about average"
+                ),
+            }
+            # Only prescribe practice for the ones actually over-represented.
+            if ratio and ratio >= ENRICHED_ABOVE and drill_for(theme):
+                rows[theme]["drill"] = drill_for(theme)
+        tactics = {
+            "note": (
+                "Tactics that punished this player's blunders. Names match Lichess "
+                "puzzle themes, so an over-represented one prescribes a drill set "
+                "directly. Read the enrichment, not the count: a common motif shows "
+                "up often in blunders because it shows up often, full stop."
+            ),
+            "blunders_with_no_named_motif": sum(
+                1 for m in blunders if not m.get("punished_by")
+            ),
+            "themes": rows,
+        }
+
     return {
         "scored_moves": len(scored),
         "blunders": len(blunders),
+        "punished_by": tactics,
         "blunder_rate_pct": round(100 * len(blunders) / len(scored), 1),
+        "refutations": forcing,
         "reading_this": (
             "Rates are over every scored move in the sample, not over the critical "
             "moments listed elsewhere. Use this section for any claim about how "

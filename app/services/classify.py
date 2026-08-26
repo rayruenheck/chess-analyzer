@@ -27,6 +27,20 @@ BLUNDER = 300
 MISTAKE = 100
 INACCURACY = 50
 
+# Percentage points of expected score given up. This is how Lichess judges moves
+# now, and what Chess.com's classes are built on; the centipawn bands above are the
+# system Lichess retired, kept only so the raw numbers stay comparable elsewhere.
+#
+# Lichess's own thresholds read .3 / .2 / .1 in Advice.scala, which is tempting to
+# copy straight across and wrong: those are deltas of `winningChances`, which
+# scalachess defines on [-1, +1] (`2 / (1 + exp(-0.00368208 * cp)) - 1`), while
+# WinPercent is `50 + 50 * winningChances` on [0, 100]. A .3 drop in winning chances
+# is therefore 15 points of expected score, not 30. Taken at face value the numbers
+# grade twice as leniently as Lichess and quietly halve the blunder count.
+BLUNDER_WIN_PCT = 15.0
+MISTAKE_WIN_PCT = 10.0
+INACCURACY_WIN_PCT = 5.0
+
 # stockfish.py reports mate as +/-100000 via mate_score. Anything near that is a
 # forced mate rather than a real centipawn count, and must not be averaged in.
 MATE_THRESHOLD = 90000
@@ -58,14 +72,20 @@ DECIDED_CP = 500
 # Logistic scale converting a centipawn evaluation into an expected score. Shared
 # with the eval bar in the UI so the two never disagree.
 #
-# Lichess publishes a scale of 1/271.6, fitted against games between 2300-rated
-# players. Deliberately not used here: checked against this app's own games, that
-# curve badly under-rates losing positions at club level -- it calls a -5 position
-# a 3.5% expected score where the real games score far higher, because below master
-# level a lost position is still very much alive. A flatter curve is the safer error
-# for coaching, since the alternative is telling a player that throwing away a bad
-# position cost them nothing.
-WIN_PROB_SCALE = 320
+# This is Lichess's published constant (1/0.00368208), fitted on games between
+# 2300-rated players. It is used here because the severity thresholds below are
+# *theirs*, and a curve and its thresholds are a matched pair: run their 30/20/10
+# against a flatter curve and every grade silently drifts down. Measured on this
+# app's own data, a flatter 1/320 produced 51 blunders where this produces 61, from
+# the same games -- the constant, not the player, decided the difference.
+#
+# Known to be wrong for the intended user. At 2300 a -5 position is over; at club
+# level it is very much alive, so this curve under-rates losing positions and, from
+# this app's own games, under-rates winning ones too. That asymmetry cannot be fixed
+# by rescaling, because a logistic is symmetric by construction. The real fix is to
+# fit expected score against outcomes from the Lichess open database filtered to the
+# player's own rating band, and to refit the thresholds with it.
+WIN_PROB_SCALE = 271.6
 
 
 def win_probability(score_cp: int | None, mate_in: int | None = None) -> float | None:
@@ -81,6 +101,89 @@ def win_probability(score_cp: int | None, mate_in: int | None = None) -> float |
     # Mate is reported as +/-100000 centipawns, which overflows exp() unclamped.
     exponent = max(-40.0, min(40.0, score_cp / WIN_PROB_SCALE))
     return 1 / (1 + math.exp(-exponent))
+
+
+def classify_by_win_probability(win_prob_lost: float | None) -> str:
+    """Severity from expected score given up, the way both major sites judge it.
+
+    Centipawn bands were the old way, and Lichess replaced them for good reason:
+    400cp given away from a dead-won position is not the same mistake as 400cp
+    from equality, and a fixed band calls them identical. These thresholds match
+    Lichess's current judgement (drops of 30 / 20 / 10 percentage points).
+
+    Chess.com additionally requires a blunder to cost material or allow mate, and
+    that refinement is deliberately *not* copied. Tried against this app's data it
+    demoted 22 real blunders, among them a king walking into a mating net for 80
+    points of expected score with no material yet lost -- concrete disasters that
+    happen not to be captures. The false positive it exists to kill, a big centipawn
+    swing where nothing real changes, is already handled by measuring expected score
+    instead of centipawns. Material change is still reported as evidence; it just
+    does not decide the grade.
+    """
+    if win_prob_lost is None:
+        return "unknown"
+    if win_prob_lost >= BLUNDER_WIN_PCT:
+        return "blunder"
+    if win_prob_lost >= MISTAKE_WIN_PCT:
+        return "mistake"
+    if win_prob_lost >= INACCURACY_WIN_PCT:
+        return "inaccuracy"
+    return "ok"
+
+
+def static_exchange(board: chess.Board, move: chess.Move) -> int:
+    """Centipawns the mover nets if both sides trade off on the target square.
+
+    Heisman's "counting": a capture that looks free until the third recapture,
+    which is a different error from a tactical oversight and has a different cure.
+    A negative result on a capture means the exchange simply loses material if the
+    opponent takes the sequence to its end.
+
+    Implemented here because python-chess does not ship a static exchange
+    evaluator. This is the standard swap-list algorithm: alternate least-valuable
+    attackers onto the square, then minimax back up, since either side may stop
+    once continuing costs more than it wins.
+    """
+    target = move.to_square
+    captured = board.piece_type_at(target)
+    if captured is None:
+        return 0
+
+    gains = [PIECE_VALUES[captured]]
+    on_square = PIECE_VALUES[board.piece_type_at(move.from_square)]
+
+    working = board.copy(stack=False)
+    working.push(move)
+
+    while True:
+        attackers = working.attackers(working.turn, target)
+        if not attackers:
+            break
+        # Recapturing with the cheapest piece is what makes the swap list correct.
+        cheapest = min(attackers, key=lambda s: PIECE_VALUES[working.piece_type_at(s)])
+        gains.append(on_square - gains[-1])
+        on_square = PIECE_VALUES[working.piece_type_at(cheapest)]
+        try:
+            working.push(chess.Move(cheapest, target))
+        except AssertionError:  # pragma: no cover - pinned piece, cannot recapture
+            gains.pop()
+            break
+
+    # Either side can decline the next capture, so fold the list back from the end.
+    for index in range(len(gains) - 2, -1, -1):
+        gains[index] = -max(-gains[index], gains[index + 1])
+    return gains[0]
+
+
+def material_balance(board: chess.Board, colour: bool) -> int:
+    """Material in centipawns from `colour`'s point of view."""
+    total = 0
+    for piece_type, value in PIECE_VALUES.items():
+        if piece_type == chess.KING:
+            continue
+        total += value * len(board.pieces(piece_type, colour))
+        total -= value * len(board.pieces(piece_type, not colour))
+    return total
 
 
 def classify_severity(eval_diff_cp: int | None) -> str:
@@ -273,7 +376,7 @@ def describe_move(
         # arrow, which needs the two squares rather than the algebraic name.
         "best_uci": best_move_uci if best_san else None,
         "best_line_san": pv_to_san(fen_before, best_pv_uci or []),
-        "severity": "ok" if played_best else classify_severity(eval_diff_cp),
+        "severity": _severity(played_best, win_prob_lost, eval_diff_cp),
         "cp_lost": cp_lost(eval_diff_cp),
         "eval_before_cp": None if is_mate_score(score_cp_before) else score_cp_before,
         "eval_after_cp": None if is_mate_score(score_cp_after) else score_cp_after,
@@ -285,6 +388,24 @@ def describe_move(
         "side_to_move": "white" if board.turn == chess.WHITE else "black",
         "tags": tags,
     }
+
+
+def _severity(
+    played_best: bool,
+    win_prob_lost: float | None,
+    eval_diff_cp: int | None,
+) -> str:
+    """Grades the move, preferring expected score and falling back to centipawns.
+
+    The fallback matters for jobs analysed before pre-move evaluations were stored:
+    those have no win probability at all, and silently grading every one of their
+    moves "unknown" would empty out the reports for a player's whole history.
+    """
+    if played_best:
+        return "ok"
+    if win_prob_lost is None:
+        return classify_severity(eval_diff_cp)
+    return classify_by_win_probability(win_prob_lost)
 
 
 def position_state(

@@ -27,6 +27,23 @@ CREATE TABLE IF NOT EXISTS move_evaluations (
     PRIMARY KEY (fen, previous_fen, depth)
 );
 
+CREATE TABLE IF NOT EXISTS tablebase_cache (
+    fen TEXT PRIMARY KEY,
+    category TEXT,
+    dtz INTEGER,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS move_probes (
+    fen TEXT NOT NULL,
+    depth INTEGER NOT NULL,
+    second_best_move TEXT,
+    second_best_score_cp INTEGER,
+    null_move_threat TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (fen, depth)
+);
+
 CREATE TABLE IF NOT EXISTS explorer_cache (
     fen TEXT NOT NULL,
     source TEXT NOT NULL,

@@ -8,6 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from app.clients.chesscom import chesscom_client
 from app.clients.lichess import lichess_client
 from app.clients.lichess_explorer import lichess_explorer_client
+from app.clients.lichess_tablebase import lichess_tablebase_client
 from app.db import close_db, init_db
 from app.routers import analysis, chesscom, explorer, feedback, games, jobs, lichess
 from app.services import llm
@@ -21,6 +22,7 @@ async def lifespan(app: FastAPI):
     await lichess_client.close()
     await chesscom_client.close()
     await lichess_explorer_client.close()
+    await lichess_tablebase_client.close()
     await stockfish_engine.close()
     await llm.close()
     await close_db()

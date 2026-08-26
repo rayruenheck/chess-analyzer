@@ -85,7 +85,32 @@ class OpeningCoach(BaseModel):
     focus: str
 
 
+class ReportClaim(BaseModel):
+    """One thing that is true about this player, with the receipts for it.
+
+    Filled before any prose, because fields are generated in the order they are
+    declared: deciding what is true and what supports it, and only then writing,
+    is what stops a good sentence dragging an unsupported claim along behind it.
+    """
+
+    # The chess idea, named -- "trades into endgames without checking the pawn
+    # race", not "endgame weakness" and not "7.3% blunder rate".
+    concept: str
+    # Ids from the facts list, e.g. ["F12", "F31"]. A claim about frequency with
+    # no fact id behind it is one you must not make.
+    evidence_ids: list[str]
+    # Citations of specific positions, e.g. ["[G3#47]"]. May be empty for a claim
+    # that rests on aggregates alone.
+    moments: list[str]
+    # Why it costs points, in one sentence.
+    why_it_matters: str
+    # The exercise that fixes it. Specific enough to actually perform.
+    drill: str
+
+
 class PlayerReport(BaseModel):
+    # Declared first on purpose -- see ReportClaim.
+    claims: list[ReportClaim]
     headline: str
     strengths: list[ReportTheme]
     weaknesses: list[ReportTheme]

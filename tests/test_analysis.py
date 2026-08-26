@@ -357,8 +357,14 @@ def test_castling_matches_despite_differing_uci_conventions():
 def test_win_probability_folds_in_mate_and_survives_mate_scores():
     assert classify.win_probability(0) == pytest.approx(0.5)
     assert classify.win_probability(None) is None
-    assert classify.win_probability(320) == pytest.approx(0.731, abs=0.001)
-    assert classify.win_probability(-320) == pytest.approx(0.269, abs=0.001)
+    # One scale unit either side of level is the logistic's own half-way point,
+    # so this pins the curve's shape without hardcoding the constant it is tuned to.
+    scale = classify.WIN_PROB_SCALE
+    assert classify.win_probability(scale) == pytest.approx(0.731, abs=0.001)
+    assert classify.win_probability(-scale) == pytest.approx(0.269, abs=0.001)
+    # Symmetric about equality, and monotonic.
+    assert classify.win_probability(100) + classify.win_probability(-100) == pytest.approx(1.0)
+    assert classify.win_probability(50) < classify.win_probability(150)
     # Mate wins outright regardless of the centipawn field.
     assert classify.win_probability(None, mate_in=3) == 1.0
     assert classify.win_probability(None, mate_in=-3) == 0.0
@@ -489,3 +495,30 @@ def test_a_real_skew_and_a_real_strength_both_get_named():
 
     assert tags["hangs_piece"]["verdict"] == "over-represented"
     assert tags["capture"]["verdict"] == "not a weakness"
+
+
+def test_severity_thresholds_are_on_the_win_percent_scale_not_winning_chances():
+    """Lichess's Advice.scala reads .3 / .2 / .1, but those are deltas of
+    `winningChances`, which scalachess defines on [-1, +1]; WinPercent is
+    `50 + 50 * winningChances` on [0, 100]. Copying .3 across as 30 points grades
+    twice as leniently as Lichess and roughly halves the blunder count."""
+    assert classify.BLUNDER_WIN_PCT == 15.0
+    assert classify.MISTAKE_WIN_PCT == 10.0
+    assert classify.INACCURACY_WIN_PCT == 5.0
+
+    # Equivalent statement: a .3 drop in winning chances IS a blunder.
+    before, after = classify.win_probability(200), classify.win_probability(-200)
+    winning_chances_drop = (2 * before - 1) - (2 * after - 1)
+    assert winning_chances_drop >= 0.3
+    assert classify.classify_by_win_probability(100 * (before - after)) == "blunder"
+
+
+def test_a_swing_in_a_decided_position_is_not_a_blunder_on_this_scale():
+    """The false positive centipawn bands produced: a large eval move where the
+    game's outcome barely changes."""
+    before, after = classify.win_probability(1400), classify.win_probability(900)
+    assert (before - after) * 100 < classify.INACCURACY_WIN_PCT
+    assert classify.classify_by_win_probability(100 * (before - after)) == "ok"
+    # ...while the same 500cp from equality is a blunder.
+    lively = classify.win_probability(250) - classify.win_probability(-250)
+    assert classify.classify_by_win_probability(100 * lively) == "blunder"

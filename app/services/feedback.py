@@ -6,8 +6,13 @@ analysis job itself, so you only pay for feedback on games you actually open.
 
 The selection logic in this module is the real cost control. A 40-move game is 80
 plies; sending all of them to the model would be expensive and would bury the
-moves that mattered. Only the player's own moves, ranked by centipawn loss, get
-sent -- the rest is compressed into aggregate counts.
+moves that mattered. Only the player's own moves are sent, chosen by how much
+expected score they threw away -- the rest is compressed into aggregate counts.
+
+Selection is also where the report's quality is decided, not just its price. The
+worst dozen moves are all catastrophes, and a habit that leaks six points a game
+across forty games never appears among them; since naming that habit is the whole
+job, _report_moments samples deliberately rather than taking the tail.
 """
 
 import json
@@ -18,7 +23,9 @@ import chess
 from app.config import settings
 from app.db import get_db
 from app.schemas import GameFeedback, MoveFeedback, OpeningCoach, PlayerReport
-from app.services import classify, evaluation, explorer, insights, llm
+from app.services import classify, evaluation, explorer, facts, insights, llm, position
+from app.services import motifs, probes, tablebase
+from app.services import validate
 from app.services import jobs as jobs_service
 from app.services.citations import GameIndex
 from app.services.fen import normalize_fen
@@ -27,12 +34,17 @@ logger = logging.getLogger(__name__)
 
 # How many of the player's worst moves get sent for explanation. Past roughly this
 # many, a review stops being actionable and starts being a wall of text.
-CRITICAL_MOMENTS_PER_GAME = 8
-# Deliberately fewer than it looks like it could afford. Examples are the wrong
-# tool for the report's actual job -- naming recurring habits -- because a list of
-# moves carries no denominator, and insights.pattern_rates answers that question
-# properly. A dozen well-chosen moments plus real rates beats a long tail of ties.
-CRITICAL_MOMENTS_PER_REPORT = 12
+# A cap rather than a quota. A fixed count is the wrong instrument for one game:
+# eight slots force eight criticisms out of a cleanly played game, where the
+# eighth-worst move cost under two points of expected score and was simply fine.
+CRITICAL_MOMENTS_PER_GAME = 10
+# Below this much expected score given away, a move is not worth reviewing.
+MOMENT_FLOOR_WIN_PCT = 5.0
+# When nothing clears the floor the game was played well, and saying so is a real
+# review -- but a couple of near misses still give the praise something to sit on.
+MOMENTS_IN_A_CLEAN_GAME = 3
+# How many worst-moments each time-control breakdown carries.
+CRITICAL_MOMENTS_PER_SPEED = 4
 
 PLY_FIELDS = [
     "ply",
@@ -51,6 +63,7 @@ PLY_FIELDS = [
     "mate_in_before",
     "score_cp_after",
     "mate_in_after",
+    "refutation_uci",
 ]
 
 _PLY_QUERY = """
@@ -59,7 +72,8 @@ SELECT p.ply, p.game_id, p.fen_before, p.fen_after, p.move_uci, p.move_san, p.mo
        me.eval_diff_cp,
        before_eval.best_move, before_eval.principal_variation,
        before_eval.score_cp, before_eval.mate_in,
-       after_eval.score_cp, after_eval.mate_in
+       after_eval.score_cp, after_eval.mate_in,
+       after_eval.best_move
 FROM game_plies p
 LEFT JOIN move_evaluations me
     ON me.fen = p.fen_after AND me.previous_fen = p.fen_before AND me.depth = ?
@@ -156,6 +170,7 @@ async def _load_plies(game_id: str, depth: int) -> list[dict]:
 def _annotate(ply: dict, game: dict | None = None) -> dict:
     """Turns one joined DB row into the fact bundle the model sees."""
     pv = ply["principal_variation"]
+    refutation = _refutation(ply)
     facts = classify.describe_move(
         fen_before=ply["fen_before"],
         move_uci=ply["move_uci"],
@@ -174,6 +189,7 @@ def _annotate(ply: dict, game: dict | None = None) -> dict:
     facts["move_number"] = (ply["ply"] + 1) // 2
     facts["game_id"] = ply["game_id"]
     facts["fen_before"] = ply["fen_before"]
+    facts["fen_after"] = ply["fen_after"]
     facts["clock_after_seconds"] = ply["clock_after_seconds"]
     facts["seconds_spent"] = ply["seconds_spent"]
 
@@ -185,7 +201,53 @@ def _annotate(ply: dict, game: dict | None = None) -> dict:
     if bank and left is not None and (game or {}).get("speed") not in insights.UNTIMED_SPEEDS:
         facts["clock_fraction_left"] = round(left / bank, 3)
         facts["time_pressure"] = left / bank <= insights.TIME_TROUBLE_FRACTION
+
+    facts.update(refutation)
     return facts
+
+
+def _refutation(ply: dict) -> dict:
+    """The opponent's best reply, and whether it was a forcing one.
+
+    This is the hope-chess signal. "You dropped 300 centipawns" does not say
+    whether the punishment was a capture sitting in plain sight or a quiet squeeze
+    twelve moves deep, and those are opposite lessons: the first is a missing habit
+    of checking replies, the second is genuinely hard chess. A refutation that
+    begins with a check or a capture is one the player could have seen by looking
+    one move ahead, which is exactly what they failed to do.
+    """
+    uci = ply.get("refutation_uci")
+    if not uci:
+        return {}
+    board = chess.Board(ply["fen_after"])
+    try:
+        move = chess.Move.from_uci(uci)
+    except ValueError:
+        return {}
+    if move not in board.legal_moves:
+        return {}
+
+    capture, check = board.is_capture(move), board.gives_check(move)
+    themes = motifs.tag(ply["fen_after"], uci)
+    # The mover is whoever moved into this position, i.e. not the side to move here.
+    mover = not board.turn
+    before = classify.material_balance(chess.Board(ply["fen_before"]), mover)
+    after_board = board.copy(stack=False)
+    after_board.push(move)
+    after = classify.material_balance(after_board, mover)
+
+    return {
+        "refutation_san": board.san(move),
+        # One ply of looking would have revealed it.
+        "refutation_is_forcing": capture or check,
+        # Chess.com's blunder gate: did the move actually cost anything, or did
+        # only the engine's number move? Counted across the move and its refutation.
+        "lost_material": after < before,
+        "material_swing_cp": after - before,
+        # Named with Lichess's puzzle vocabulary, so a weakness found here can be
+        # turned into a themed drill set the player can actually go and practise.
+        "punished_by": themes,
+    }
 
 
 def _summarize(annotated: list[dict]) -> dict:
@@ -249,6 +311,23 @@ def _critical(annotated: list[dict], limit: int) -> list[dict]:
     problem: centipawns measure the position, and selection has to measure what the
     mistake cost.
     """
+    ranked = _by_cost(annotated)
+    if not ranked:
+        return []
+
+    # A job analysed before pre-move evaluations were stored has no win probability
+    # on any move, so the floor cannot be applied to it -- fall back to taking the
+    # worst `limit` by centipawns rather than treating the whole game as clean.
+    if not any(m.get("win_prob_lost") is not None for m in ranked):
+        return sorted(ranked[:limit], key=lambda m: m["ply"])
+
+    above = [m for m in ranked if (m.get("win_prob_lost") or 0) >= MOMENT_FLOOR_WIN_PCT]
+    chosen = above[:limit] if above else ranked[:MOMENTS_IN_A_CLEAN_GAME]
+    return sorted(chosen, key=lambda m: m["ply"])
+
+
+def _by_cost(annotated: list[dict]) -> list[dict]:
+    """Moves that cost something, worst first."""
     ranked = sorted(
         (
             m
@@ -266,7 +345,80 @@ def _critical(annotated: list[dict], limit: int) -> list[dict]:
             key=lambda m: m["cp_lost"],
             reverse=True,
         )
-    return sorted(ranked[:limit], key=lambda m: m["ply"])
+    return ranked
+
+
+# How the report's examples are apportioned. Selecting purely by cost returns the
+# tail -- twelve catastrophes -- and a habit that shows up as a six-point leak in
+# forty games can never be selected, however often it recurs. Since finding the
+# recurring thing is the report's entire job, the sample is built to contain it.
+REPORT_QUOTAS = (
+    ("worst overall", 6),
+    ("a won position thrown away", 3),
+    ("a typical error, not a catastrophe", 4),
+)
+# The band a habitual leak lives in: costly enough to matter, ordinary enough to
+# repeat. Catastrophes are already covered by the quota above.
+TYPICAL_BAND = (5.0, 15.0)
+
+
+def _report_moments(annotated: list[dict]) -> list[dict]:
+    """A stratified sample of mistakes, not simply the worst ones.
+
+    Each moment carries why it was chosen, so the model knows what job the example
+    is doing rather than treating a routine slip and a thrown-away win alike.
+    """
+    ranked = _by_cost(annotated)
+    chosen: dict[tuple, dict] = {}
+
+    def take(reason: str, candidates: list[dict], quota: int) -> None:
+        for move in candidates:
+            if quota <= 0:
+                return
+            key = (move.get("game_id"), move.get("ply"))
+            if key in chosen:
+                continue
+            chosen[key] = {**move, "selected_as": reason}
+            quota -= 1
+
+    take("worst overall", ranked, REPORT_QUOTAS[0][1])
+    take(
+        "a won position thrown away",
+        [m for m in ranked if m.get("position_state") == "winning"],
+        REPORT_QUOTAS[1][1],
+    )
+    low, high = TYPICAL_BAND
+    take(
+        "a typical error, not a catastrophe",
+        [m for m in ranked if low <= (m.get("win_prob_lost") or 0) < high],
+        REPORT_QUOTAS[2][1],
+    )
+    # Cover any phase the sample missed entirely, so the report cannot conclude
+    # the player never errs in an opening it simply was not shown.
+    for phase in ("opening", "middlegame", "endgame"):
+        if not any(m.get("phase") == phase for m in chosen.values()):
+            take(f"the only {phase} example", [m for m in ranked if m.get("phase") == phase], 1)
+
+    return sorted(chosen.values(), key=lambda m: (str(m.get("game_id")), m.get("ply") or 0))
+
+
+def _with_imbalances(moments: list[dict]) -> list[dict]:
+    """Attaches the positional features to the moments actually being discussed.
+
+    Only these, not every ply: the imbalances are what let the model coach a
+    concept rather than a number, but a hundred games of them would be most of the
+    payload and the model only ever writes about the selected moments.
+    """
+    out = []
+    for moment in moments:
+        enriched = dict(moment)
+        fen, colour = moment.get("fen_before"), moment.get("side_to_move")
+        if fen and colour:
+            imbalances = position.features(fen, colour, moment.get("phase"))
+            if imbalances:
+                enriched["imbalances"] = imbalances
+        out.append(enriched)
+    return out
 
 
 # How deep to look for the point where a player leaves known theory. Past about
@@ -474,7 +626,7 @@ async def explain_game(game_id: str, depth: int | None = None, refresh: bool = F
     every_move = [_annotate(p, game) for p in plies]
     own = [m for m in every_move if m["side_to_move"] == game["user_color"]]
     stats = _summarize(own)
-    moments = _critical(own, CRITICAL_MOMENTS_PER_GAME)
+    moments = await probes.enrich(_with_imbalances(_critical(own, CRITICAL_MOMENTS_PER_GAME)), depth)
 
     # Numbered against the whole job so "Game 3" means the same game here as it
     # does in the sidebar and in the cross-game report.
@@ -559,7 +711,7 @@ def _by_time_control(
             "sessions": insights.session_summary(
                 [g for g in per_game if g["game_id"] in ids]
             ),
-            "worst_moments": _critical(moves, 4),
+            "worst_moments": _critical(moves, CRITICAL_MOMENTS_PER_SPEED),
         }
 
     return breakdown
@@ -839,6 +991,13 @@ async def build_report(
         if g["initial_seconds"] and g["speed"] not in insights.UNTIMED_SPEEDS
     }
 
+    endgame_flips: list[dict] = []
+    for game in games:
+        own_moves = [m for m in all_moves if m["game_id"] == game["game_id"]]
+        endgame_flips.extend(await tablebase.review(own_moves, game["user_color"]))
+
+    report_moments = await probes.enrich(_with_imbalances(_report_moments(all_moves)), depth)
+
     payload = {
         "task": (
             "Identify this player's recurring patterns across these games. Name real "
@@ -891,10 +1050,17 @@ async def build_report(
         if missed
         else None,
         "sessions": insights.session_summary(per_game),
+        # Ground truth rather than an estimate, and the only section that can say
+        # a result actually changed rather than an evaluation moving.
+        "endgame_technique": tablebase.summary(endgame_flips),
         "per_game": per_game,
-        "critical_moments": _critical(all_moves, CRITICAL_MOMENTS_PER_REPORT),
+        "critical_moments": report_moments,
     }
     payload = index.swap_ids(payload)
+    # Flattened last: it reads the finished aggregates and turns them into the
+    # numbered menu the model must cite from.
+    payload["facts"] = facts.build(payload)
+    payload["using_facts"] = facts.summary(payload["facts"])
     feedback = await llm.generate(
         kind="report",
         subject=f"{job_id}:{speed}" if speed else job_id,
@@ -906,8 +1072,17 @@ async def build_report(
         refresh=refresh,
     )
     feedback, cited = index.resolve(feedback)
+    # Every move and number in the prose has to exist in what the model was given.
+    grounding = validate.check(feedback, payload)
+    if not grounding["ok"]:
+        logger.warning(
+            "Report for %s contains unsupported content: moves=%s numbers=%s",
+            job_id, grounding["invented_moves"], grounding["invented_numbers"],
+        )
     return {
         "statistics": payload["overall"],
+        "facts": payload["facts"],
+        "grounding": grounding,
         "by_time_control": payload["by_time_control"],
         "openings": payload["openings"],
         "book_exits": payload["book_exits"],
@@ -915,6 +1090,7 @@ async def build_report(
         "conversion": payload["conversion"],
         "missed_punishment": payload["missed_punishment"],
         "sessions": payload["sessions"],
+        "endgame_technique": payload["endgame_technique"],
         "rates": payload["rates"],
         "per_game": payload["per_game"],
         "games": index.scope(games),

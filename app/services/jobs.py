@@ -6,6 +6,7 @@ import uuid
 import chess
 import chess.pgn
 
+from app.config import settings
 from app.db import get_db
 from app.services import evaluation
 from app.services.fen import normalize_fen
@@ -110,6 +111,32 @@ def _walk_plies(pgn_text: str, increment: float = 0.0, initial: float | None = N
         }
 
 
+async def _evaluate_plies(plies: list[dict]) -> None:
+    """Evaluates a game's positions across the engine pool.
+
+    Bounded by the pool size: queueing every ply at once would not go any faster,
+    since they would all wait on the same engines, and it would make a failure
+    mid-game harder to attribute to the position that caused it.
+
+    Positions repeat across a game -- one ply's `fen_after` is the next one's
+    `fen_before` -- so concurrent workers can ask for the same evaluation twice.
+    That costs a duplicated search at worst; the cache write is idempotent.
+    """
+    limit = asyncio.Semaphore(max(1, settings.stockfish_workers))
+
+    async def one(ply: dict) -> None:
+        async with limit:
+            after_eval, _ = await evaluation.get_or_analyze(ply["fen_after"])
+            await evaluation.get_or_compute_diff(
+                ply["fen_after"],
+                ply["fen_before"],
+                after_eval["depth"],
+                after_eval["score_cp"],
+            )
+
+    await asyncio.gather(*(one(ply) for ply in plies))
+
+
 async def _save_ply(job_id: str, game_id: str, platform: str, ply: dict) -> None:
     db = get_db()
     await db.execute(
@@ -208,14 +235,12 @@ async def run_analysis_job(job_id: str, platform: str, username: str, max_games:
                     increment=game.increment_seconds or 0,
                     initial=game.initial_seconds,
                 )
+                # Every position in a game is independent, so they go to the
+                # engine pool together rather than one at a time. A serial loop
+                # leaves five of six engines idle and was what made a hundred-game
+                # job an hour's work.
+                await _evaluate_plies(plies)
                 for ply in plies:
-                    after_eval, _ = await evaluation.get_or_analyze(ply["fen_after"])
-                    await evaluation.get_or_compute_diff(
-                        ply["fen_after"],
-                        ply["fen_before"],
-                        after_eval["depth"],
-                        after_eval["score_cp"],
-                    )
                     await _save_ply(job_id, game.game_id, platform, ply)
 
             # Only now is every ply of this game on disk. The games row is written

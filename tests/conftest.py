@@ -42,6 +42,36 @@ def no_network(monkeypatch):
     monkeypatch.setattr(httpx.AsyncClient, "send", forbidden)
 
 
+@pytest.fixture(autouse=True)
+def no_engine(monkeypatch):
+    """Fails loudly if anything tries to start Stockfish.
+
+    Analysis at depth is slow and the binary is not guaranteed present, so the
+    suite never launches it. This is a guard rather than documentation: probes.py
+    added an engine call behind an existing code path and nothing failed, because
+    the caller caught the error and carried on.
+    """
+    import chess.engine
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError(
+            "A test tried to launch Stockfish. Stub the engine call instead."
+        )
+
+    monkeypatch.setattr(chess.engine, "popen_uci", forbidden)
+
+
+@pytest.fixture(autouse=True)
+def stub_probes(monkeypatch):
+    """No second-best or null-move probes in tests; they need a live engine."""
+    from app.services import probes
+
+    async def no_probe(fen, depth=None):
+        return {}
+
+    monkeypatch.setattr(probes, "probe", no_probe)
+
+
 @pytest.fixture
 def db_path(tmp_path, monkeypatch):
     path = tmp_path / "test.db"
@@ -220,11 +250,16 @@ def seed(client):
                 (START_FEN, 20, "e2e4", '["e2e4","e7e5"]'),
                 (AFTER_E4, 25, "e7e5", '["e7e5","g1f3"]'),
                 # Deliberately NOT the move played from this position: the seeded
-                # -120 diff on 3.Nf3 only registers as a mistake if the engine
-                # preferred something else, since agreement with the engine
-                # suppresses the severity label.
+                # loss on 3.Nf3 only registers as a mistake if the engine preferred
+                # something else, since agreement with the engine suppresses the
+                # severity label.
                 (AFTER_E5, 30, "f1c4", '["f1c4","g8f6"]'),
-                (AFTER_NF3, 35, "b8c6", '["b8c6"]'),
+                # +30 to -100 is a ~12 point drop in expected score: a mistake on
+                # the win-probability bands the app grades with (blunder starts at 15).
+                # These scores and the diff below have to agree: severity reads the
+                # evaluations, so a diff invented independently of them is a fixture
+                # that quietly contradicts itself.
+                (AFTER_NF3, -100, "b8c6", '["b8c6"]'),
             ):
                 connection.execute(
                     "INSERT OR REPLACE INTO evaluations "
@@ -236,7 +271,7 @@ def seed(client):
             for after, before, diff in (
                 (AFTER_E4, START_FEN, 5),
                 (AFTER_E5, AFTER_E4, -5),
-                (AFTER_NF3, AFTER_E5, -120),
+                (AFTER_NF3, AFTER_E5, -130),
             ):
                 connection.execute(
                     "INSERT OR REPLACE INTO move_evaluations "

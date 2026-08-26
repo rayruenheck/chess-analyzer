@@ -17,8 +17,18 @@ class LichessExplorerClient:
     """
 
     # Seconds between requests. Lichess asks API clients to keep concurrency at one
-    # and back off; this is the proactive half of that bargain.
+    # and back off; this is the proactive half of that bargain. It is a starting
+    # point rather than a fixed rate -- see _interval, which grows when the server
+    # actually pushes back.
     MIN_REQUEST_INTERVAL = 0.7
+    # A 429 means the opening rate was too high for this session, so slow down for
+    # the rest of it rather than rediscovering the limit on every later request. A
+    # report walks hundreds of positions; without this it re-hits the wall for each.
+    BACKOFF_FACTOR = 1.6
+    MAX_REQUEST_INTERVAL = 6.0
+    # Lichess sends no Retry-After on explorer 429s, so this is the assumed cooldown.
+    DEFAULT_RETRY_AFTER = 8.0
+    MAX_RETRIES = 3
 
     def __init__(self) -> None:
         headers = {
@@ -43,24 +53,56 @@ class LichessExplorerClient:
         # losing every remaining game's analysis.
         self._throttle = asyncio.Lock()
         self._last_request = 0.0
+        self._interval = self.MIN_REQUEST_INTERVAL
 
     async def _wait_turn(self) -> None:
         async with self._throttle:
             elapsed = time.monotonic() - self._last_request
-            if elapsed < self.MIN_REQUEST_INTERVAL:
-                await asyncio.sleep(self.MIN_REQUEST_INTERVAL - elapsed)
+            if elapsed < self._interval:
+                await asyncio.sleep(self._interval - elapsed)
             self._last_request = time.monotonic()
+
+    def _slow_down(self) -> None:
+        self._interval = min(self._interval * self.BACKOFF_FACTOR, self.MAX_REQUEST_INTERVAL)
+
+    @staticmethod
+    def _retry_after(resp: httpx.Response) -> float | None:
+        raw = resp.headers.get("Retry-After")
+        if not raw:
+            return None
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            return None
+
+    async def _get(self, path: str, params: dict) -> dict:
+        """One throttled GET, retrying while the server is rate-limiting us.
+
+        Without this a single 429 partway through a report killed the opening
+        analysis for every remaining game -- the caller cannot retry usefully,
+        because by then it has already given up on the whole feature. Backing off
+        here keeps a slow answer, which is worth far more than no answer.
+        """
+        for attempt in range(self.MAX_RETRIES + 1):
+            await self._wait_turn()
+            resp = await self._client.get(path, params=params)
+            if resp.status_code != 429:
+                resp.raise_for_status()
+                return resp.json()
+
+            self._slow_down()
+            if attempt == self.MAX_RETRIES:
+                resp.raise_for_status()
+            await asyncio.sleep(self._retry_after(resp) or self.DEFAULT_RETRY_AFTER)
+
+        raise RuntimeError("unreachable")
 
     async def get_masters(
         self, fen: str, moves: int = 12, top_games: int = 4
     ) -> dict:
-        await self._wait_turn()
-        resp = await self._client.get(
-            "/masters",
-            params={"fen": fen, "moves": moves, "topGames": top_games},
+        return await self._get(
+            "/masters", {"fen": fen, "moves": moves, "topGames": top_games}
         )
-        resp.raise_for_status()
-        return resp.json()
 
     async def get_lichess(
         self,
@@ -75,10 +117,7 @@ class LichessExplorerClient:
             params["ratings"] = ",".join(str(r) for r in ratings)
         if speeds:
             params["speeds"] = ",".join(speeds)
-        await self._wait_turn()
-        resp = await self._client.get("/lichess", params=params)
-        resp.raise_for_status()
-        return resp.json()
+        return await self._get("/lichess", params)
 
     async def get_player(
         self,

@@ -269,6 +269,19 @@
   .scale { font-size: 10.5px; color: var(--dim); margin-top: 6px; }
   /* Enrichment is a verdict, so the number is always paired with the word -- an
      over/under call must never rest on the colour alone. */
+  /* Claims are the report's receipts: what the model asserted, and the fact ids
+     and positions behind each one. Rendered so a reader can audit a sentence
+     instead of trusting it. */
+  .claim { border-left: 2px solid var(--accent); padding: 2px 0 2px 11px; margin-bottom: 11px; }
+  .claim h4 { font-size: 13px; margin-bottom: 3px; }
+  .claim .drill { color: var(--ink-2); }
+  .claim .drill b { color: var(--dim); font-weight: 600; font-size: 10.5px;
+                    text-transform: uppercase; letter-spacing: .07em; }
+  .fid { font-size: 11px; font-variant-numeric: tabular-nums; color: var(--dim);
+         background: var(--raised); border-radius: 3px; padding: 1px 5px; margin-right: 3px; }
+  .ungrounded { border: 1px solid var(--blunder); border-radius: 8px; padding: 9px 12px;
+                margin-bottom: 12px; font-size: 12.5px; }
+  .ungrounded b { color: var(--blunder); }
   .verdict { color: var(--dim); }
   .verdict.over { color: var(--blunder); }
   .verdict.under { color: var(--good); }
@@ -542,7 +555,7 @@ function setEvalBar(cp, mate, matedBy) {
   // which otherwise leaves the bar sitting at a meaningless dead even.
   if (matedBy) { pct = matedBy === "white" ? 100 : 0; text = "#"; }
   else if (mate != null) { pct = mate > 0 ? 100 : 0; text = "M" + Math.abs(mate); }
-  else if (cp != null) { pct = 100 / (1 + Math.exp(-cp / 320)); text = (cp >= 0 ? "+" : "") + (cp / 100).toFixed(1); }
+  else if (cp != null) { pct = 100 / (1 + Math.exp(-cp / 271.6)); text = (cp >= 0 ? "+" : "") + (cp / 100).toFixed(1); }
   // The fill is always White's share of the bar; which end it grows from
   // follows the board's orientation.
   $("evalWrap").classList.toggle("flip", state.flipped);
@@ -831,6 +844,29 @@ function conversionHtml(conv, missed) {
   return html;
 }
 
+function claimsHtml(claims) {
+  if (!claims?.length) return "";
+  return '<p class="label">What this is based on</p>' + claims.map(c => `
+    <div class="claim">
+      <h4>${rich(c.concept)}</h4>
+      <p>${rich(c.why_it_matters)}</p>
+      <p>${(c.evidence_ids || []).map(id => `<span class="fid">${esc(id)}</span>`).join("")}
+         ${(c.moments || []).map(m => rich(m)).join(" ")}</p>
+      <p class="drill"><b>Drill</b> ${rich(c.drill)}</p>
+    </div>`).join("");
+}
+
+// Surfaced rather than hidden: a move or number that was not in the payload is
+// the model inventing, and the reader deserves to know which report it happened in.
+function groundingHtml(g) {
+  if (!g || g.ok) return "";
+  const bits = [];
+  if (g.invented_moves?.length) bits.push("moves not in the analysis: " + g.invented_moves.map(esc).join(", "));
+  if (g.invented_numbers?.length) bits.push("figures not in the data: " + g.invented_numbers.map(esc).join(", "));
+  return `<div class="ungrounded"><b>Unverified content.</b> This report mentions
+    ${bits.join("; ")}. Everything else checked out against the engine data.</div>`;
+}
+
 /* ---- tab loaders ------------------------------------------------------- */
 async function loadGameReview() {
   if (!state.gameId) return renderTab('<span class="muted">Pick a game first.</span>');
@@ -933,7 +969,9 @@ async function loadReport() {
       ? '<p class="muted">Opening explorer unavailable — no theory comparison.</p>' : "";
     renderTab(`
       <h3 class="headline">${rich(f.headline)}</h3>
+      ${groundingHtml(d.grounding)}
       ${scorecard(d.statistics)}
+      ${claimsHtml(f.claims)}
       ${ratesHtml(d.rates)}
       <p class="label">Working well</p>${themes(f.strengths)}
       <p class="label">Costing you points</p>${themes(f.weaknesses)}

@@ -69,10 +69,13 @@ def test_game_moves_include_evaluation_and_timing(client, seed):
     assert first["clock_after_seconds"] == 598.0
     assert first["is_player_move"] is True
 
-    # The seeded -120 diff on the player's third ply must land as a mistake.
+    # The seeded loss on the player's third ply must land as a mistake, and it is
+    # the drop in expected score that decides that -- not the centipawn number,
+    # which is still reported alongside it.
     third = body["moves"][2]
     assert third["severity"] == "mistake"
-    assert third["cp_lost"] == 120
+    assert third["cp_lost"] == 130
+    assert 10 <= third["win_prob_lost"] < 15
 
 
 def test_game_moves_statistics_cover_only_the_players_moves(client, seed):
@@ -407,4 +410,4 @@ def test_matching_the_engine_is_never_graded_a_mistake(client, seed, monkeypatch
 
     assert "engine_best" in third["tags"]
     assert third["severity"] == "ok"
-    assert third["cp_lost"] == 120  # the number is still reported honestly
+    assert third["cp_lost"] == 130  # the number is still reported honestly
