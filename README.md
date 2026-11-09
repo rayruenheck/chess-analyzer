@@ -1,54 +1,95 @@
-# chess-analyzer
+# Chess Analyzer
 
-FastAPI app that pulls game history from Lichess and Chess.com, evaluates positions
-with Stockfish, and turns the result into written coaching feedback from Claude.
-Everything is cached in SQLite. Also integrates the Lichess Opening Explorer
-(masters DB, community DB by rating band, per-player DB) to compare a player's moves
-against common theory/practice at their level.
+Pulls a player's game history from Lichess and Chess.com, runs every move through
+Stockfish, and turns the results into written coaching. Stockfish decides what is
+true about a move. Claude only decides how to say it.
 
-Open `http://127.0.0.1:8000/` for the UI: enter a username, watch the analysis run,
-then step through any game with an eval bar, a colour-coded move list, and a written
-review of what went wrong.
+![Move review in the UI: the engine line, what went wrong, and what to play instead](docs/screenshot.png)
+
+## Why it is built this way
+
+- **The engine is the source of truth.** The model is never asked to evaluate a
+  position or pick a move. `app/services/classify.py` works out the facts about each
+  move (severity, phase, engine agreement, the principal variation) and
+  `app/services/llm.py` only explains them. Coaching cites the game and move each
+  claim came from, and a citation the model makes up falls back to plain text
+  instead of linking to the wrong position.
+- **Evaluations are deterministic, so they can be cached.** Stockfish runs at a fixed
+  depth (18) as a pool of single-threaded engines, and each search starts from a
+  clean transposition table. On 44 benchmark positions, engines with a warm table
+  disagreed with a serial run on 9 best moves. With a clean table they agree exactly,
+  and the pool is still nearly 4x faster than one engine.
+- **Positions are cached by normalized FEN and depth**, so any game that transposes
+  into a position already seen costs nothing to evaluate.
+- **The model only runs on games you open.** The bulk analysis job never calls it,
+  and every response is cached by a hash of the exact request.
+
+## What it found in my own games
+
+100 of my games, around 1500 on Chess.com: 2,946 moves and 156 blunders.
+
+| Finding | Result |
+| --- | --- |
+| Blunder rate with more than half my clock left | 3.4% |
+| Blunder rate with under 10% of my clock left | 16.3% |
+| Blunder rate in winning positions vs. competitive ones | 9.7% vs. 4.3% |
+| Blunders punished right away by a check or capture | 59% |
+
+The first pass blamed endgames for most of my blunders. Pulling the clock data traced
+them to time pressure instead. Captures were not a weakness: they were 21% of my
+blunders and 24% of all my moves.
+
+**Known limitation:** win probability uses a logistic scale of 1/320, picked to match
+the eval bar rather than fitted to data. At club level it under-rates how lost a
+losing position is.
+
+## Stack
+
+Python, FastAPI, SQLite (aiosqlite), python-chess, Stockfish, the Lichess and
+Chess.com APIs, the Lichess Opening Explorer and tablebase, and the Anthropic API.
+The UI is a single HTML file with no build step.
 
 ## Setup
 
-```powershell
-venv\Scripts\Activate.ps1
+Needs Python and a Stockfish binary.
+
+```bash
+python -m venv venv
+venv\Scripts\activate        # macOS/Linux: source venv/bin/activate
 pip install -r requirements.txt
-copy .env.example .env   # already pre-filled with your local Stockfish path
+copy .env.example .env       # macOS/Linux: cp .env.example .env
 ```
 
-`.env` needs two keys filled in to unlock everything: `ANTHROPIC_API_KEY` for the
-coaching feedback, and `LICHESS_TOKEN` (any token, no scopes) for the opening
-explorer. The app runs without either — analysis, board, evals and move list all
-work — and the affected routes say why they are unavailable.
+Set `STOCKFISH_PATH` in `.env` to your Stockfish executable (on Windows,
+`winget install Stockfish.Stockfish` is the quickest way to get one).
 
-Stockfish was installed via `winget install Stockfish.Stockfish` and is referenced
-directly by path in `.env` (no PATH restart needed).
+Two optional keys unlock the rest: `ANTHROPIC_API_KEY` for the coaching feedback,
+and `LICHESS_TOKEN` (any token, no scopes) for the opening explorer. The app runs
+without either. Analysis, the board, evals, and the move list all work, and the
+affected routes say why they are unavailable.
 
 ## Run
 
-```powershell
-venv\Scripts\python -m uvicorn app.main:app
+```bash
+python -m uvicorn app.main:app
 ```
 
-Drop `--reload` for real analysis runs. Jobs run as FastAPI `BackgroundTasks`, so
-they die with the process: any reload cancels an in-flight job, which the job then
+Open http://127.0.0.1:8000/ for the app: enter a username, watch the analysis run,
+then step through any game with an eval bar, a color-coded move list, and a written
+review. `/docs` has the interactive Swagger UI.
+
+Leave off `--reload` for real analysis runs. Jobs run as FastAPI `BackgroundTasks`,
+so they die with the process: a reload cancels an in-flight job, which the job then
 records as a cancellation rather than a crash.
-
-Then open http://127.0.0.1:8000/ for the app, or /docs for interactive Swagger UI.
-
-Coaching feedback needs `ANTHROPIC_API_KEY` in `.env`. Without it everything else
-still works -- analysis, board, evals, move list -- and `/feedback/*` returns 503.
 
 ## Tests
 
-```powershell
+```bash
 pip install -r requirements-dev.txt
-venv\Scripts\python -m pytest
+python -m pytest
 ```
 
-117 tests, ~7 seconds, and safe to run at any time: **no test reaches the network or
+182 tests, about 9 seconds, and safe to run at any time: **no test reaches the network or
 touches `data/chess_analyzer.db`.** Every model call is stubbed (they cost money),
 every platform and explorer call is stubbed (rate limits and flakiness), Stockfish is
 never launched, and each test gets a fresh SQLite file under `tmp_path`. The `client`
